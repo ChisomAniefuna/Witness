@@ -1,0 +1,5 @@
+{
+  "name": "WITNESS",
+  "description": "An AI-powered noir detective game where you scan your room to find clues and interrogate witnesses.",
+  "requestFramePermissions": ["camera"]
+}
