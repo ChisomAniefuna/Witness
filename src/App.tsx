@@ -323,6 +323,12 @@ export default function App() {
     }
   };
 
+  const hasScan = detections.length > 0;
+  const hasPersona = !!persona;
+  const hasInterrogation = !!persona && messages.length > 0;
+  const hasAccusation = !!accusationOptions;
+  const hasVerdict = !!verdict;
+
   return (
     <div className={`w-full h-full flex flex-col ${isDark ? 'bg-bg text-ink' : 'bg-bg text-ink'}`}>
       <AnimatePresence mode="wait">
@@ -802,7 +808,7 @@ export default function App() {
 
                 <button
                   onClick={() => window.location.reload()}
-                  className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-ink py-5 active:scale-95 transition-all"
+                  className="w-full font-display text-xs tracking-[5px] text-ink uppercase bg-surface border border-border py-5 active:bg-surface2 transition-all"
                 >
                   NEW INVESTIGATION
                 </button>
@@ -917,7 +923,7 @@ export default function App() {
             </div>
 
             {/* Bottom Panel */}
-            <div className="bg-surface border-t border-border px-6 pt-4 pb-8">
+            <div className="bg-surface border-t border-border px-6 pt-4 pb-24">
               <div className="flex items-center gap-2 mb-3">
                 <div className="w-1.5 h-1.5 rounded-full bg-greenbr animate-breathe" />
                 <span className="font-mono text-[10px] tracking-[3px] text-greenbr uppercase">
@@ -985,23 +991,50 @@ export default function App() {
       {/* Navigation & Utilities */}
       {['camera', 'witness', 'interrogation', 'accusation', 'casefile'].includes(currentScreen) && (
         <div className="fixed bottom-0 left-0 right-0 h-[62px] bg-bg/95 border-t border-border z-50 flex items-stretch">
-          <button onClick={() => setCurrentScreen('camera')} className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'camera' ? 'border-red-noir' : 'border-transparent'}`}>
+          <button
+            onClick={() => setCurrentScreen('camera')}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'camera' ? 'border-red-noir' : 'border-transparent'}`}
+          >
             <Camera className={`w-4 h-4 ${currentScreen === 'camera' ? 'text-red-noir' : 'text-ink4'}`} />
             <span className={`font-mono text-[7px] tracking-wider uppercase ${currentScreen === 'camera' ? 'text-red-noir' : 'text-ink4'}`}>Scene</span>
           </button>
-          <button onClick={() => setCurrentScreen('witness')} className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'witness' ? 'border-red-noir' : 'border-transparent'}`}>
+          <button
+            onClick={() => {
+              if (!hasPersona) return;
+              setCurrentScreen('witness');
+            }}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'witness' ? 'border-red-noir' : 'border-transparent'} ${!hasPersona ? 'opacity-30 cursor-not-allowed' : ''}`}
+          >
             <Eye className={`w-4 h-4 ${currentScreen === 'witness' ? 'text-red-noir' : 'text-ink4'}`} />
             <span className={`font-mono text-[7px] tracking-wider uppercase ${currentScreen === 'witness' ? 'text-red-noir' : 'text-ink4'}`}>Witness</span>
           </button>
-          <button onClick={() => setCurrentScreen('interrogation')} className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'interrogation' ? 'border-red-noir' : 'border-transparent'}`}>
+          <button
+            onClick={() => {
+              if (!hasInterrogation) return;
+              setCurrentScreen('interrogation');
+            }}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'interrogation' ? 'border-red-noir' : 'border-transparent'} ${!hasInterrogation ? 'opacity-30 cursor-not-allowed' : ''}`}
+          >
             <Mic className={`w-4 h-4 ${currentScreen === 'interrogation' ? 'text-red-noir' : 'text-ink4'}`} />
             <span className={`font-mono text-[7px] tracking-wider uppercase ${currentScreen === 'interrogation' ? 'text-red-noir' : 'text-ink4'}`}>Interrogate</span>
           </button>
-          <button onClick={() => setCurrentScreen('accusation')} className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'accusation' ? 'border-red-noir' : 'border-transparent'}`}>
+          <button
+            onClick={() => {
+              if (!hasAccusation) return;
+              setCurrentScreen('accusation');
+            }}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'accusation' ? 'border-red-noir' : 'border-transparent'} ${!hasAccusation ? 'opacity-30 cursor-not-allowed' : ''}`}
+          >
             <Scale className={`w-4 h-4 ${currentScreen === 'accusation' ? 'text-red-noir' : 'text-ink4'}`} />
             <span className={`font-mono text-[7px] tracking-wider uppercase ${currentScreen === 'accusation' ? 'text-red-noir' : 'text-ink4'}`}>Accuse</span>
           </button>
-          <button onClick={() => setCurrentScreen('casefile')} className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'casefile' ? 'border-red-noir' : 'border-transparent'}`}>
+          <button
+            onClick={() => {
+              if (!hasVerdict) return;
+              setCurrentScreen('casefile');
+            }}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'casefile' ? 'border-red-noir' : 'border-transparent'} ${!hasVerdict ? 'opacity-30 cursor-not-allowed' : ''}`}
+          >
             <FileText className={`w-4 h-4 ${currentScreen === 'casefile' ? 'text-red-noir' : 'text-ink4'}`} />
             <span className={`font-mono text-[7px] tracking-wider uppercase ${currentScreen === 'casefile' ? 'text-red-noir' : 'text-ink4'}`}>Case File</span>
           </button>
