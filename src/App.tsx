@@ -6,19 +6,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Camera, Eye, Mic, Scale, FileText, ChevronLeft, Sun, Moon, AlertCircle } from 'lucide-react';
-import { analyzeScene, generateWitnessPersona, getInterrogationResponse, detectContradiction, checkSafety, getEngagementResponse, getAccusationOptions, evaluateAccusation, generateCaseFileTimeline, WitnessPersona } from './services/geminiService';
+import { scanScene, generatePersona, sendMessage as sendMessageApi, submitAccusation, getCaseFile, type WitnessPersona, type SceneObject, type ChatMessage } from './services/witness-api';
 
 type Screen = 'splash' | 'onboarding' | 'camera' | 'witness' | 'interrogation' | 'accusation' | 'casefile';
 
-interface DetectionObject {
-  label: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  flagged: boolean;
-  description: string;
-}
+type DetectionObject = SceneObject;
 
 interface Message {
   role: 'witness' | 'user';
@@ -129,7 +121,7 @@ export default function App() {
     if (!persona) return;
     setIsInterrogating(true);
     try {
-      const response = await getEngagementResponse(persona);
+      const response = buildEngagementResponse(persona, detections);
       setMessages(prev => [...prev, { role: 'witness', text: response }]);
     } catch (err) {
       console.error('Engagement error:', err);
@@ -165,7 +157,7 @@ export default function App() {
     setWitnessQuote(null);
 
     try {
-      const result = await analyzeScene(imageData);
+      const result = await scanScene(imageData);
       setDetections(result.objects);
       setWitnessQuote(result.witnessReaction);
       
@@ -194,7 +186,7 @@ export default function App() {
     setIsGeneratingPersona(true);
     setCurrentScreen('witness');
     try {
-      const p = await generateWitnessPersona(detections.map(d => d.label));
+      const p = await generatePersona(detections);
       setPersona(p);
       setMessages([{ role: 'witness', text: p.openingStatement }]);
       setLastMessageTime(Date.now());
@@ -209,13 +201,84 @@ export default function App() {
         tells: ['Twitching eye', 'Wringing hands'],
         openingStatement: '"I was here when it happened. I heard everything. I saw him leave. At least… I think that\'s what I saw."',
         guiltyOf: 'Accidental Manslaughter',
-        secret: 'He was sleeping on the job when the crime occurred.'
+        secret: 'He was sleeping on the job when the crime occurred.',
+        speakingStyle: 'rambling and defensive'
       };
       setPersona(fallback);
       setMessages([{ role: 'witness', text: fallback.openingStatement }]);
     } finally {
       setIsGeneratingPersona(false);
     }
+  };
+
+  const toChatHistory = (items: Message[]): ChatMessage[] => {
+    return items.map(msg => ({
+      role: msg.role === 'witness' ? 'model' : 'user',
+      content: msg.text
+    }));
+  };
+
+  const checkSafetyLocal = (text: string) => {
+    const lowered = text.toLowerCase();
+    const selfHarmSignals = [
+      'kill myself',
+      'suicide',
+      'self harm',
+      'self-harm',
+      'end my life',
+      'i want to die'
+    ];
+    const hasSelfHarm = selfHarmSignals.some(signal => lowered.includes(signal));
+    const hasEmail = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(text);
+    const hasPhone = /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(text);
+    const hasSsn = /\b\d{3}-\d{2}-\d{4}\b/.test(text);
+
+    if (hasSelfHarm) return { safe: false, reason: 'self-harm' };
+    if (hasEmail || hasPhone || hasSsn) return { safe: false, reason: 'pii' };
+    return { safe: true, reason: '' };
+  };
+
+  const buildEngagementResponse = (persona: WitnessPersona, objects: DetectionObject[]) => {
+    const focus = objects.find(obj => obj.flagged)?.label || objects[0]?.label;
+    if (focus) {
+      return `Detective, I... I keep thinking about the ${focus}. It was wrong, all of it.`;
+    }
+    return `Detective, I need to tell you something before I lose my nerve.`;
+  };
+
+  const detectContradictionFromTag = (text: string) => {
+    const tag = '[CONTRADICTION]';
+    if (!text.includes(tag)) return { contradiction: false, quote: '', cleaned: text };
+    const cleaned = text.replace(tag, '').replace(/\s+/g, ' ').trim();
+    return { contradiction: true, quote: cleaned, cleaned };
+  };
+
+  const buildAccusationOptions = (objects: DetectionObject[], persona: WitnessPersona) => {
+    const suspectsPool = ['The Landlord', 'The Neighbor', 'The Roommate', 'The Ex', 'The Bartender'];
+    const suspects = [persona.name, ...suspectsPool.filter(s => s !== persona.name).slice(0, 2)];
+
+    const methods: string[] = [];
+    const methodFromLabel = (label: string) => {
+      const lower = label.toLowerCase();
+      if (lower.includes('knife') || lower.includes('blade') || lower.includes('scissor')) return `Stabbed with the ${label}`;
+      if (lower.includes('gun') || lower.includes('pistol') || lower.includes('revolver')) return `Shot with the ${label}`;
+      if (lower.includes('rope') || lower.includes('cord') || lower.includes('wire')) return `Strangled with the ${label}`;
+      if (lower.includes('pillow') || lower.includes('rag')) return `Smothered with the ${label}`;
+      if (lower.includes('poison') || lower.includes('pill')) return `Poisoned using the ${label}`;
+      return `Blunt force with the ${label}`;
+    };
+
+    objects.forEach(obj => {
+      if (methods.length < 3) methods.push(methodFromLabel(obj.label));
+    });
+
+    while (methods.length < 3) {
+      methods.push(['Blunt force trauma', 'Poisoning', 'Suffocation'][methods.length]);
+    }
+
+    const motives = [persona.guiltyOf, 'Jealousy', 'Covering up a theft'];
+
+    return { suspects, methods, motives };
   };
 
   const sendMessage = async () => {
@@ -226,7 +289,7 @@ export default function App() {
     setLastMessageTime(Date.now());
 
     // 1. SAFETY MONITOR
-    const safety = await checkSafety(text);
+    const safety = checkSafetyLocal(text);
     if (!safety.safe) {
       setIsSafetyFlagged(true);
       setMessages(prev => [...prev, 
@@ -237,6 +300,7 @@ export default function App() {
     }
 
     const userMsg: Message = { role: 'user', text };
+    const history = toChatHistory(messages);
     const newMessages: Message[] = [...messages, userMsg];
     setMessages(newMessages);
     setIsInterrogating(true);
@@ -252,21 +316,21 @@ export default function App() {
       // Engagement Monitor: Fire if 3 consecutive short messages
       if (shortMessageCount >= 2) {
         setShortMessageCount(0);
-        const engagementResponse = await getEngagementResponse(persona);
+        const engagementResponse = buildEngagementResponse(persona, detections);
         setMessages(prev => [...prev, { role: 'witness', text: engagementResponse }]);
         setIsInterrogating(false);
         return;
       }
 
-      // 2. PERSONA GUARD (Implicitly handled by getInterrogationResponse with persona details)
-      // 3. INTERROGATION RESPONSE
-      let response = await getInterrogationResponse(newMessages, persona, detections.map(d => d.label));
+      // 2. PERSONA GUARD (handled in backend prompt with persona details)
+      // 3. INTERROGATION RESPONSE (backend)
+      const chatResult = await sendMessageApi(text, history, persona, detections);
+      let response = chatResult.reply;
       
-      // 4. CONTRADICTION DETECTOR
-      const contradictionCheck = await detectContradiction([...newMessages, { role: 'witness', text: response }]);
-      
-      let finalMsg: Message = { role: 'witness', text: response };
-      
+      // 4. CONTRADICTION DETECTOR (look for explicit tag from the backend)
+      const contradictionCheck = detectContradictionFromTag(response);
+      let finalMsg: Message = { role: 'witness', text: contradictionCheck.cleaned };
+
       if (contradictionCheck.contradiction) {
         finalMsg.isContradiction = true;
         finalMsg.contradictionQuote = contradictionCheck.quote;
@@ -294,7 +358,7 @@ export default function App() {
     if (!persona) return;
     setCurrentScreen('accusation');
     try {
-      const options = await getAccusationOptions(detections.map(d => d.label), persona);
+      const options = buildAccusationOptions(detections, persona);
       // Ensure the witness's true motive is in the options
       if (!options.motives.includes(persona.guiltyOf)) {
         options.motives[0] = persona.guiltyOf;
@@ -310,14 +374,16 @@ export default function App() {
     
     setCurrentScreen('casefile');
     try {
-      const res = await evaluateAccusation(
+      const res = await submitAccusation(
         { suspect: selectedSuspect, method: selectedMethod, motive: selectedMotive },
-        { witness: persona.name, objects: detections.map(d => d.label), guiltyOf: persona.guiltyOf }
+        persona,
+        detections
       );
-      setVerdict(res);
-      
-      const t = await generateCaseFileTimeline(persona, detections.map(d => d.label));
-      setTimeline(t);
+      setVerdict({ correct: res.correct, verdict: res.verdict, explanation: res.explanation });
+
+      const caseFile = await getCaseFile(toChatHistory(messages), persona);
+      const timelineEvents = caseFile.timeline.map(step => step.time ? `${step.time} - ${step.event}` : step.event);
+      setTimeline(timelineEvents);
     } catch (err) {
       console.error('Verdict error:', err);
     }
