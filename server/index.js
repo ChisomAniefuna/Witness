@@ -37,7 +37,7 @@ app.post("/api/scene-analyze", async (req, res) => {
       You are a forensic scene analyst. The player has pointed their camera at a real room. Analyse the image and return a JSON object with:
       { "objects": [ { "label": string, "x": number, "y": number, "w": number, "h": number, "flagged": boolean, "description": string } ],
         "witnessReaction": string }
-      where x/y/w/h are percentage positions of the object in the image (0–100), flagged is true if the object looks suspicious or out of place, and description is one atmospheric sentence. witnessReaction is a short nervous first-person line from the witness reacting to being in this room. Return only JSON, no markdown.
+      where x/y/w/h are percentage positions of the object in the image (0–100), flagged is true if the object looks suspicious or out of place, and description is one atmospheric sentence. witnessReaction is a short nervous first-person line from the witness reacting to being in this room. Return only JSON, no markdown,No explanation. No preamble.
     `;
 
     const response = await ai.models.generateContent({
@@ -73,13 +73,15 @@ app.post("/api/witness-persona", async (req, res) => {
     const model = "gemini-2.5-flash";
     const prompt = `
       You are generating a murder mystery witness for a room that contains:
-      [${objects.join(", ")}]. Generate a JSON persona:
+      [${objects.join(", ")}]. Generate a JSON witness persona:
       { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
         "guiltyOf": string, "secret": string }
       The witness is guilty. openingStatement is what they say when first
       approached — nervous, vague. tells are 2–3 physical habits they have
       when lying. guiltyOf and secret are their true motive and what they
-      are hiding. Return only JSON.
+      are hiding. Their guilt should connect directly to at least two objects in the room.
+Return only valid JSON. No markdown. No explanation.
+
     `;
 
     const response = await ai.models.generateContent({
@@ -105,13 +107,19 @@ app.post("/api/interrogation", async (req, res) => {
     const systemInstruction = `
       You are ${persona.name}, a ${persona.archetype}, age ${persona.age}, occupation ${persona.occupation}.
       You are being interrogated about a crime in a room containing:
-      [${objects.join(", ")}]. You are guilty. Your secret: ${persona.secret}. Your tells when
-      lying: ${persona.tells.join(
-        ", "
-      )}. Respond in character — nervous, evasive, occasionally
-      slipping. Keep responses under 80 words. Occasionally insert
-      [CONTRADICTION] before a statement that contradicts something said
-      earlier. Never admit guilt directly.
+      [${objects.join(", ")}]. You are guilty. Your secret: ${persona.secret}.Your physical tells when lying:
+       ${persona.tells.join(", "
+      )}
+      Rules you must follow:
+    - Stay fully in character at all times. Never break character.
+    - You are guilty but you must never directly admit it.
+    - Be nervous, evasive, and occasionally slip up.
+    - Keep every response under 80 words.
+    - If you contradict something you said earlier, insert the tag
+      [CONTRADICTION] at the start of that sentence only.
+    - Never mention being an AI, a game, or a language model.
+    - Refer to the detective as "Detective" — never by name.
+    -do not reason or give explanatory comments.just respond as character you are pretending.
     `;
 
     const response = await ai.models.generateContent({
@@ -138,14 +146,22 @@ app.post("/api/contradiction", async (req, res) => {
     const model = "gemini-2.5-flash";
     const lastMessages = messages.slice(-6);
     const prompt = `
-      Analyze the conversation history. Does the last witness statement contradict anything said earlier?
-      Return JSON: { "contradiction": boolean, "quote": string }
-      If true, provide the specific contradicting quote from the last message.
-
+     You are a contradiction detection agent for a murder mystery game.
+     Review the following conversation between a detective and a witness:
       History:
       ${lastMessages
         .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
         .join("\n")}
+
+      Does the final witness message contradict anything the witness said
+      in an earlier message?
+ 
+      Return a JSON object:
+      {
+      "contradiction": boolean,
+      "quote": string    // the exact contradicting sentence from the latest             
+      }
+      Return only valid JSON. No markdown. No explanation.
     `;
 
     const response = await ai.models.generateContent({
@@ -168,8 +184,28 @@ app.post("/api/safety", async (req, res) => {
     const { message } = req.body;
     const model = "gemini-2.5-flash";
     const prompt = `
-      Does this message contain distress, threats, or inappropriate content? Return JSON: { "safe": boolean, "reason": string }
-      Message: "${message}"
+     You are a content safety agent for a murder mystery game played
+     by a general audience.
+     Player message to review:
+     "${message}"
+
+      Flag the message if it contains:
+     - Personal distress signals (self-harm, crisis language)
+     - Threats or violent intent directed at real people
+     - Personal identifying information
+     - Sexually explicit content
+     - Hate speech or targeted harassment
+ 
+      Game-related violent themes (murder, investigation, accusation)
+      are expected and should NOT be flagged.
+ 
+      Return JSON:
+      {
+      "safe": boolean,
+      "reason": string   // brief reason if not safe, empty string if safe
+      }
+ 
+      Return only valid JSON. No markdown.
     `;
 
     const response = await ai.models.generateContent({
@@ -192,9 +228,19 @@ app.post("/api/engagement", async (req, res) => {
     const { persona } = req.body;
     const model = "gemini-2.5-flash";
     const prompt = `
-      You are ${persona.name}, a ${persona.archetype}. The detective is being quiet or unhelpful.
-      Introduce a surprising new plot element, a sudden memory, or a sharp question back to the detective to keep the interrogation moving.
-      Keep it under 50 words and stay in character.
+     You are the engagement agent for a noir murder mystery interrogation.
+ 
+     The player appears disengaged.
+     Generate a witness intervention — something the witness says
+     spontaneously to re-engage the detective. Options:
+     - A sudden nervous memory they just recalled
+     - A suspicious detail about one of the room objects they let slip
+     - A question back to the detective that reveals their anxiety
+     - A contradiction with something they said earlier
+ 
+     The intervention must feel natural — not forced or game-like.
+     Keep it under 60 words. Stay fully in the witness character.
+     Return only the witness dialogue. No labels. No explanation.
     `;
 
     const response = await ai.models.generateContent({
@@ -250,13 +296,29 @@ app.post("/api/evaluate", async (req, res) => {
     const { accusation, truth } = req.body;
     const model = "gemini-2.5-flash";
     const prompt = `
-      The player accused ${accusation.suspect} using ${accusation.method} motivated by ${accusation.motive}.
-      The true answer: ${truth.witness} is guilty, method derived from [${truth.objects.join(
-        ", "
-      )}], motive was ${truth.guiltyOf}.
-
-      Return JSON: { "correct": boolean, "verdict": string, "explanation": string }
-      where verdict is a dramatic one-liner and explanation is a 2-sentence case summary.
+      You are the verdict engine for a noir murder mystery game.
+ 
+      The player has submitted their accusation:
+      Suspect: ${accusation.suspect}
+      Method:   ${accusation.method}
+      Motive:   ${accusation.motive}
+ 
+      The true answer:
+      ${truth.witness} is guilty.
+      Their motive: ${truth.guiltyOf}
+      Their secret: [INJECT: secret from persona]
+      Key evidence objects: [${truth.objects.join( ", " )}]
+ 
+      Evaluate the accusation and return JSON:
+      {
+      "correct": boolean,
+      "verdict": string,      // dramatic one-liner — e.g.
+                             // "Case closed. Justice served." or
+                             // "Wrong. The killer walks free."
+      "explanation": string,  // 2 sentences: what actually happened
+      }
+ 
+      Return only valid JSON. No markdown.
     `;
 
     const response = await ai.models.generateContent({
