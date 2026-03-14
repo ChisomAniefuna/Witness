@@ -413,17 +413,31 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             }>;
           } | undefined;
 
-          const getTranscript = (t: typeof inputTrans): string => {
+          const isFinalTranscript = (t: typeof inputTrans | typeof outputTrans): boolean => {
+            if (!t || typeof t !== 'object') return false;
+            const r = t as Record<string, unknown>;
+            // If a partial flag is present, treat partial === false as final.
+            if (typeof r['partial'] === 'boolean') {
+              return (r['partial'] as boolean) === false;
+            }
+            // Otherwise, presence of a final_* field indicates final transcript.
+            if (typeof r['final_transcript'] === 'string' || typeof r['finalTranscript'] === 'string') {
+              return true;
+            }
+            return false;
+          };
+
+          const getTranscript = (t: typeof inputTrans | typeof outputTrans): string => {
             if (!t || typeof t !== 'object') return '';
             const r = t as Record<string, unknown>;
-            const v = r.final_transcript ?? r.finalTranscript ?? r.transcript ?? r.text;
+            const v = r['final_transcript'] ?? r['finalTranscript'] ?? r['transcript'] ?? r['text'];
             return typeof v === 'string' ? v : '';
           };
 
-          const userText = getTranscript(inputTrans);
+          const userText = isFinalTranscript(inputTrans) ? getTranscript(inputTrans) : '';
           if (userText) onUserTranscript?.(userText);
 
-          const witnessText = getTranscript(outputTrans);
+          const witnessText = isFinalTranscript(outputTrans) ? getTranscript(outputTrans) : '';
           if (witnessText) {
             setStatusSafe('witness_speaking');
             onWitnessTranscript?.(stripWitnessLabels(witnessText));
