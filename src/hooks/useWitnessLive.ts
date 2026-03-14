@@ -202,6 +202,16 @@ export function createLiveAudioPlayer(): {
     accumulator.buffers = [];
     accumulator.totalBytes = 0;
     playing = false;
+    if (ctx) {
+      try {
+        // Close the AudioContext to release audio resources and allow GC.
+        ctx.close().catch(() => {});
+      } catch (_) {
+        // Ignore errors if the context is already closed or in an invalid state.
+      } finally {
+        ctx = null;
+      }
+    }
   }
 
   function playChunk(data: string | number[], mimeType?: string): void {
