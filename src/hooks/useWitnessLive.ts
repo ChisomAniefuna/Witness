@@ -355,7 +355,15 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
         source.connect(processor);
         processor.connect(ctx.destination);
       })
-      .catch((err) => console.error('useWitnessLive: mic error', err));
+      .catch((err) => {
+        console.error('useWitnessLive: mic error', err);
+        // Reflect mic failure in hook state so UI can show actionable feedback.
+        setError(err instanceof Error ? err.message : 'Microphone access failed. Please check permissions and input device.');
+        setStatusSafe('idle');
+        if (enableMicRef && 'current' in enableMicRef) {
+          enableMicRef.current = false;
+        }
+      });
   }, [onInterrupted, setStatusSafe]);
 
   const startLive = useCallback(
