@@ -218,8 +218,37 @@ async def websocket_live(websocket: WebSocket):
                 "Live API connection closed: %s (code 1008 often means model/feature not enabled for this key or policy).",
                 e,
             )
+            # Notify client of error and close WebSocket so it can recover cleanly.
+            try:
+                error_payload = {
+                    "type": "error",
+                    "message": "Live API connection closed",
+                    "detail": str(e),
+                }
+                await websocket.send_text(json.dumps(error_payload))
+            except Exception:
+                # Ignore failures while attempting to notify the client.
+                logger.debug("Failed to send downstream error message to client", exc_info=True)
+            try:
+                await websocket.close()
+            except Exception:
+                logger.debug("Failed to close WebSocket after downstream error", exc_info=True)
         except Exception as e:
             logger.exception("Downstream task error: %s", e)
+            # Notify client of error and close WebSocket so it can recover cleanly.
+            try:
+                error_payload = {
+                    "type": "error",
+                    "message": "Downstream task error",
+                    "detail": str(e),
+                }
+                await websocket.send_text(json.dumps(error_payload))
+            except Exception:
+                logger.debug("Failed to send downstream error message to client", exc_info=True)
+            try:
+                await websocket.close()
+            except Exception:
+                logger.debug("Failed to close WebSocket after downstream error", exc_info=True)
 
     try:
         await asyncio.gather(upstream_task(), downstream_task(), return_exceptions=True)
