@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Eye, Mic, Scale, FileText, ChevronLeft, Sun, Moon, AlertCircle } from 'lucide-react';
+import { Camera, Eye, Mic, Scale, FileText, ChevronLeft, Sun, Moon, AlertCircle, Volume2, VolumeX } from 'lucide-react';
 import { analyzeScene, generateWitnessPersona, getInterrogationResponse, detectContradiction, checkSafety, getEngagementResponse, getAccusationOptions, evaluateAccusation, generateCaseFileTimeline, WitnessPersona } from './services/geminiService';
 import { useWitnessLive, createLiveAudioPlayer } from './hooks/useWitnessLive';
 
@@ -120,6 +120,145 @@ function resolveInitialScreen(persisted: PersistedStateV1 | null): Screen {
   }
 }
 
+// ── Atmospheric audio ─────────────────────────────────────────────────────────
+
+const useAtmosphericAudio = (isActive: boolean, tensionLevel: number) => {
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const droneRef = useRef<{ osc1: OscillatorNode; osc2: OscillatorNode; osc3: OscillatorNode; gain: GainNode } | null>(null);
+  const [isMuted, setIsMuted] = useState(() => {
+    const saved = localStorage.getItem('audio_muted');
+    return saved === 'true';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('audio_muted', String(isMuted));
+  }, [isMuted]);
+
+  useEffect(() => {
+    if (isActive && !audioCtxRef.current) {
+      audioCtxRef.current = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    }
+
+    if (isActive && audioCtxRef.current && !isMuted) {
+      if (audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume();
+      }
+
+      if (!droneRef.current) {
+        const ctx = audioCtxRef.current;
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const osc3 = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const filter = ctx.createBiquadFilter();
+
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(400, ctx.currentTime);
+
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(40, ctx.currentTime);
+
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(40.5, ctx.currentTime);
+
+        osc3.type = 'sawtooth';
+        osc3.frequency.setValueAtTime(80, ctx.currentTime);
+        const osc3Gain = ctx.createGain();
+        osc3Gain.gain.setValueAtTime(0, ctx.currentTime);
+
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 2);
+
+        osc1.connect(filter);
+        osc2.connect(filter);
+        osc3.connect(osc3Gain);
+        osc3Gain.connect(filter);
+        filter.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc1.start();
+        osc2.start();
+        osc3.start();
+        droneRef.current = { osc1, osc2, osc3, gain };
+        (droneRef.current as unknown as Record<string, unknown>).osc3Gain = osc3Gain;
+        (droneRef.current as unknown as Record<string, unknown>).filter = filter;
+      }
+    } else {
+      if (droneRef.current) {
+        const ctx = audioCtxRef.current;
+        if (ctx) {
+          droneRef.current.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+          const d = droneRef.current;
+          setTimeout(() => {
+            d.osc1.stop();
+            d.osc2.stop();
+            d.osc3.stop();
+          }, 500);
+        }
+        droneRef.current = null;
+      }
+    }
+
+    return () => {
+      if (droneRef.current) {
+        droneRef.current.osc1.stop();
+        droneRef.current.osc2.stop();
+        droneRef.current.osc3.stop();
+        droneRef.current = null;
+      }
+    };
+  }, [isActive, isMuted]);
+
+  useEffect(() => {
+    if (droneRef.current && audioCtxRef.current && !isMuted) {
+      const ctx = audioCtxRef.current;
+      const targetGain = Math.min(0.04 + tensionLevel * 0.02, 0.12);
+      droneRef.current.gain.gain.linearRampToValueAtTime(targetGain, ctx.currentTime + 1);
+
+      const osc3Gain = (droneRef.current as unknown as Record<string, GainNode>).osc3Gain;
+      const filter = (droneRef.current as unknown as Record<string, BiquadFilterNode>).filter;
+
+      osc3Gain.gain.linearRampToValueAtTime(tensionLevel * 0.005, ctx.currentTime + 1);
+      filter.frequency.linearRampToValueAtTime(400 + tensionLevel * 100, ctx.currentTime + 1);
+      droneRef.current.osc1.frequency.linearRampToValueAtTime(40 + tensionLevel * 1, ctx.currentTime + 1);
+      droneRef.current.osc2.frequency.linearRampToValueAtTime(40.5 + tensionLevel * 1.1, ctx.currentTime + 1);
+    }
+  }, [tensionLevel, isMuted]);
+
+  const playTell = (type: 'gulp' | 'tick') => {
+    if (!audioCtxRef.current || isMuted) return;
+    const ctx = audioCtxRef.current;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    if (type === 'tick') {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(800, ctx.currentTime);
+      gain.gain.setValueAtTime(0.005, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.01);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.01);
+    } else if (type === 'gulp') {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(160, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 0.2);
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+    }
+  };
+
+  return { playTell, isMuted, setIsMuted };
+};
+
 export default function App() {
   const [persistedState] = useState<PersistedStateV1 | null>(() => loadPersistedState());
   const [currentScreen, setCurrentScreen] = useState<Screen>(() => resolveInitialScreen(persistedState));
@@ -158,6 +297,7 @@ export default function App() {
   const [verdict, setVerdict] = useState<Verdict | null>(() => persistedState?.verdict ?? null);
   const [timeline, setTimeline] = useState<string[]>(() => persistedState?.timeline ?? []);
   const [isSafetyFlagged, setIsSafetyFlagged] = useState(false);
+  const [detectiveName, setDetectiveName] = useState('');
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -204,6 +344,15 @@ export default function App() {
   const toggleTheme = () => {
     setIsDark(prev => !prev);
   };
+
+  const { playTell, isMuted, setIsMuted } = useAtmosphericAudio(currentScreen === 'interrogation', contradictionCount);
+
+  useEffect(() => {
+    if (currentScreen === 'interrogation') {
+      const interval = setInterval(() => playTell('tick'), 8000);
+      return () => clearInterval(interval);
+    }
+  }, [currentScreen, isMuted]);
 
   useEffect(() => {
     const theme = isDark ? 'dark' : 'light';
@@ -627,9 +776,21 @@ export default function App() {
                 <div className="w-1.5 h-1.5 rounded-full bg-border" />
                 <div className="w-1.5 h-1.5 rounded-full bg-border" />
               </div>
+              <div className="mb-4">
+                <div className="font-mono text-[9px] tracking-[4px] text-ink3 uppercase mb-2">Detective ID</div>
+                <input
+                  type="text"
+                  value={detectiveName}
+                  onChange={e => setDetectiveName(e.target.value)}
+                  placeholder="Enter your name"
+                  className="w-full bg-surface border border-border font-mono text-sm text-ink px-4 py-3 focus:outline-none focus:border-red-noir placeholder:text-ink3/50"
+                  maxLength={32}
+                />
+              </div>
               <button
                 onClick={() => setCurrentScreen('camera')}
-                className="w-full font-display text-xs tracking-[5px] text-white uppercase cursor-pointer bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
+                disabled={detectiveName.trim() === ''}
+                className="w-full font-display text-xs tracking-[5px] text-white uppercase cursor-pointer bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 ENTER THE SCENE
               </button>
@@ -753,6 +914,13 @@ export default function App() {
                   <div className="font-mono text-[7px] tracking-[2px] text-ink4 uppercase">Contradictions</div>
                   <div className="font-display text-xs text-red-noir">{contradictionCount}</div>
                 </div>
+                <button
+                  onClick={() => setIsMuted(m => !m)}
+                  className="text-ink3 hover:text-ink transition-colors"
+                  aria-label={isMuted ? 'Unmute audio' : 'Mute audio'}
+                >
+                  {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                </button>
                 <div className={`font-mono text-xs tracking-[2px] ${timeLeft < 30 ? 'text-red-noir animate-pulse' : 'text-ink2'}`}>
                   {formatTime(timeLeft)}
                 </div>
