@@ -99,8 +99,8 @@ export default function App() {
     onReady: () => {
       if (!liveKickoffPendingRef.current) return;
       liveKickoffPendingRef.current = false;
-      // Slight delay so the connection feels responsive, but doesn't overlap the initial handshake.
-      window.setTimeout(() => sendLiveText('Begin interrogation.'), 500);
+      // Send kickoff immediately so the witness starts speaking with minimal wait.
+      window.setTimeout(() => sendLiveText('Begin interrogation.'), 100);
     },
   });
 

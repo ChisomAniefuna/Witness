@@ -31,6 +31,8 @@ steps:
       - "--allow-unauthenticated"
       - "--port"
       - "8081"
+      - "--max-instances"
+      - "2"
 
 images:
   - "gcr.io/$PROJECT_ID/witness-live"

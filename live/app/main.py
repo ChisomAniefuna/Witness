@@ -16,10 +16,14 @@ import uuid
 
 from pathlib import Path
 
+from collections import defaultdict
 from dotenv import load_dotenv  # pyright: ignore[reportMissingImports]
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # pyright: ignore[reportMissingImports]
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect  # pyright: ignore[reportMissingImports]
 from fastapi.middleware.cors import CORSMiddleware  # pyright: ignore[reportMissingImports]
 from fastapi.responses import FileResponse  # pyright: ignore[reportMissingImports]
+from slowapi import Limiter, _rate_limit_exceeded_handler  # pyright: ignore[reportMissingImports]
+from slowapi.util import get_remote_address  # pyright: ignore[reportMissingImports]
+from slowapi.errors import RateLimitExceeded  # pyright: ignore[reportMissingImports]
 from google.genai import types  # pyright: ignore[reportMissingImports]
 from google.genai.errors import APIError as GenaiAPIError  # pyright: ignore[reportMissingImports]
 from google.adk.agents.live_request_queue import LiveRequestQueue  # pyright: ignore[reportMissingImports]
@@ -44,7 +48,15 @@ USER_ID_MVP = "witness-user"
 # One in-memory session service for all connections (sessions die when connection closes)
 session_service = InMemorySessionService()
 
+# Rate limiting: HTTP by IP; WebSocket max concurrent connections per IP
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Witness Live", version="0.1.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Per-IP concurrent WebSocket connection count (protect key from abuse)
+ws_connections_per_ip: dict[str, int] = defaultdict(int)
+WS_MAX_PER_IP = 3
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,13 +76,25 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root():
+    """This service is the voice API only. The app is hosted separately (e.g. Firebase Hosting)."""
+    return {
+        "service": "witness-live",
+        "message": "Voice API only. Use the main app URL to play. Endpoints: /health, /test-live (harness), /live (WebSocket).",
+        "endpoints": {"health": "/health", "test_harness": "/test-live", "websocket": "/live"},
+    }
+
+
 @app.get("/health")
-async def health():
+@limiter.limit("60/minute")
+async def health(request: Request):
     return {"status": "ok", "service": "witness-live"}
 
 
 @app.get("/test-live")
-async def test_live_page():
+@limiter.limit("30/minute")
+async def test_live_page(request: Request):
     """Serve a minimal test UI to exercise the Live WebSocket without the full app."""
     _live_root = Path(__file__).resolve().parent.parent
     path = _live_root / "test_live.html"
@@ -82,7 +106,16 @@ async def test_live_page():
 
 @app.websocket("/live")
 async def websocket_live(websocket: WebSocket):
-    await websocket.accept()
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    if ws_connections_per_ip[client_ip] >= WS_MAX_PER_IP:
+        await websocket.close(code=1008, reason="Too many concurrent voice sessions from this IP")
+        return
+    ws_connections_per_ip[client_ip] += 1
+    try:
+        await websocket.accept()
+    except Exception:
+        ws_connections_per_ip[client_ip] -= 1
+        raise
     session_id = str(uuid.uuid4())
 
     # Send connected so client can verify
@@ -259,6 +292,7 @@ async def websocket_live(websocket: WebSocket):
         logger.exception("Streaming error: %s", e)
     finally:
         live_request_queue.close()
+        ws_connections_per_ip[client_ip] = max(0, ws_connections_per_ip[client_ip] - 1)
         logger.debug("Closed queue for session %s", session_id)
 
 

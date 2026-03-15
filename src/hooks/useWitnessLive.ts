@@ -129,10 +129,10 @@ function decodeAudioData(data: string | number[]): ArrayBuffer | null {
   return null;
 }
 
-// Lower buffer reduces "initial silence" before speech starts; we also flush on turn_complete.
-const MIN_BUFFER_MS = 30;
+// Buffer before playing: larger = smoother playback, less crackling; smaller = lower latency. We flush on turn_complete so tail doesn't get stuck.
+const MIN_BUFFER_MS = 100;
 
-/** Create a simple queue-based PCM player for witness audio (e.g. 24 kHz from Gemini). Buffers ~100ms to reduce crackling. */
+/** Create a simple queue-based PCM player for witness audio (e.g. 24 kHz from Gemini). Buffers to reduce crackling. */
 export function createLiveAudioPlayer(): {
   playChunk: (data: string | number[], mimeType?: string) => void;
   /** Flush any buffered audio (call when ending the session so the last chunk plays). */

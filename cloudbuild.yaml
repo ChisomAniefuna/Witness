@@ -24,6 +24,8 @@ steps:
       - "--platform"
       - "managed"
       - "--allow-unauthenticated"
+      - "--max-instances"
+      - "2"
 
 images:
   - "gcr.io/$PROJECT_ID/witness-backend"

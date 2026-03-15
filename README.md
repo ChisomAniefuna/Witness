@@ -168,6 +168,36 @@ gcloud builds submit --config=cloudbuild-live.yaml .
 
 Build context is the `live/` directory (see `cloudbuild-live.yaml`). In Cloud Run, set `GOOGLE_GENAI_API_KEY` (and optionally Vertex env vars). Then set the frontend’s `VITE_LIVE_WS_URL` to the Live service URL, e.g. `wss://witness-live-xxxx.run.app` (use `wss://` for HTTPS).
 
+**Hosting the frontend (Firebase Hosting)**
+
+Host the Vite app on **Firebase Hosting** (not Firestore; Firestore is a database). After both Cloud Run services are deployed:
+
+1. **One-time: enable Firebase for your GCP project**  
+   Go to [Firebase Console](https://console.firebase.google.com/) → **Add project** → choose your existing GCP project (e.g. `witness-489710`). Then open **Build → Hosting** and click **Get started** to create the default Hosting site.
+2. **Install Firebase CLI** (if needed): `npm install -g firebase-tools` then `firebase login`.
+3. **Link the project**: `firebase use witness-489710` (or your project id). Ensure `firebase.json` has `"site": "witness-489710"` under `hosting` so deploys target the right site.
+4. **Build the app with production API URLs** (replace with your Cloud Run URLs):
+
+   ```bash
+   VITE_API_BASE_URL="https://witness-backend-XXXXX-uc.a.run.app" \
+   VITE_LIVE_WS_URL="wss://witness-live-XXXXX-uc.a.run.app" \
+   npm run build
+   ```
+
+5. **Deploy**:
+
+   ```bash
+   firebase deploy
+   ```
+
+   The repo includes `firebase.json` so Firebase Hosting serves the `dist/` folder with SPA rewrites. Your app will be at `https://witness-489710.web.app` (or your custom domain).
+
+**Deploy order**
+
+1. Deploy Node backend → note URL → set `GEMINI_API_KEY` in Cloud Run.  
+2. Deploy Live service → note URL → set `GOOGLE_GENAI_API_KEY` in Cloud Run.  
+3. Build frontend with those two URLs, then `firebase deploy`.
+
 ---
 
 ### Repo structure
@@ -182,6 +212,7 @@ Build context is the `live/` directory (see `cloudbuild-live.yaml`). In Cloud Ru
 - `cloudbuild.yaml` – Cloud Build pipeline for Node backend.
 - `cloudbuild-live.yaml` – Cloud Build pipeline for Python Live service.
 - `Dockerfile` – Node backend image; `live/Dockerfile` – Python Live image.
+- `firebase.json` – Firebase Hosting config (serves `dist/` with SPA rewrites).
 
 ---
 

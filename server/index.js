@@ -1,6 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
@@ -10,6 +11,17 @@ const port = process.env.PORT || 8080;
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+
+// Rate limit API to protect key: per IP, 60 requests per 15 minutes (skip health check)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: "Too many requests; try again later." },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === "/healthz",
+});
+app.use("/api", apiLimiter);
 
 const apiKey = process.env.GEMINI_API_KEY;
 
