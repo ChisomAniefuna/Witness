@@ -1,0 +1,29 @@
+{
+  "entities": {
+    "DetectiveProfile": {
+      "title": "Detective Profile",
+      "description": "Stores the persistent stats and achievements for a detective.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique ID of the detective (Firebase Auth UID)." },
+        "displayName": { "type": "string", "description": "The name the detective chose." },
+        "totalScore": { "type": "integer", "description": "Cumulative score across all cases." },
+        "casesSolved": { "type": "integer", "description": "Number of cases successfully closed." },
+        "casesAttempted": { "type": "integer", "description": "Total number of cases started." },
+        "badges": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of earned badge IDs."
+        },
+        "lastUpdated": { "type": "string", "format": "date-time", "description": "ISO timestamp of last update." }
+      },
+      "required": ["uid", "displayName", "totalScore", "casesSolved", "casesAttempted"]
+    }
+  },
+  "firestore": {
+    "/detectives/{detectiveId}": {
+      "schema": "DetectiveProfile",
+      "description": "Collection of detective profiles indexed by their Auth UID."
+    }
+  }
+}
