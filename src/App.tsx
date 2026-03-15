@@ -28,38 +28,135 @@ interface Message {
   contradictionQuote?: string;
 }
 
+interface AccusationOptions {
+  suspects: string[];
+  methods: string[];
+  motives: string[];
+}
+
+interface Verdict {
+  correct: boolean;
+  verdict: string;
+  explanation: string;
+}
+
+const STORAGE_KEY = 'witness_state_v1';
+
+interface PersistedStateV1 {
+  version: 1;
+  savedAt: number;
+  currentScreen: Screen;
+  detections: DetectionObject[];
+  showProceed: boolean;
+  persona: WitnessPersona | null;
+  messages: Message[];
+  timeLeft: number;
+  contradictionCount: number;
+  lastMessageTime: number;
+  witnessQuote: string | null;
+  analysisError: boolean;
+  accusationOptions: AccusationOptions | null;
+  selectedSuspect: string | null;
+  selectedMotive: string | null;
+  selectedMethod: string | null;
+  verdict: Verdict | null;
+  timeline: string[];
+}
+
+function loadPersistedState(): PersistedStateV1 | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedStateV1;
+    if (!parsed || parsed.version !== 1) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function persistState(state: PersistedStateV1): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore write errors (private mode, quota, etc.)
+  }
+}
+
+function resolveInitialScreen(persisted: PersistedStateV1 | null): Screen {
+  if (!persisted) return 'splash';
+  const hasScan = Array.isArray(persisted.detections) && persisted.detections.length > 0;
+  const hasPersona = !!persisted.persona;
+  const hasInterrogation = hasPersona && Array.isArray(persisted.messages) && persisted.messages.length > 0;
+  const hasAccusation = !!persisted.accusationOptions;
+  const hasVerdict = !!persisted.verdict;
+
+  switch (persisted.currentScreen) {
+    case 'casefile':
+      if (hasVerdict) return 'casefile';
+      if (hasAccusation) return 'accusation';
+      if (hasInterrogation) return 'interrogation';
+      if (hasPersona) return 'witness';
+      return hasScan ? 'camera' : 'splash';
+    case 'accusation':
+      if (hasAccusation) return 'accusation';
+      if (hasInterrogation) return 'interrogation';
+      if (hasPersona) return 'witness';
+      return hasScan ? 'camera' : 'splash';
+    case 'interrogation':
+      if (hasInterrogation) return 'interrogation';
+      if (hasPersona) return 'witness';
+      return hasScan ? 'camera' : 'splash';
+    case 'witness':
+      if (hasPersona) return 'witness';
+      return hasScan ? 'camera' : 'splash';
+    case 'camera':
+      return 'camera';
+    case 'onboarding':
+      return hasScan ? 'camera' : 'onboarding';
+    case 'splash':
+    default:
+      return 'splash';
+  }
+}
+
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<Screen>('splash');
+  const [persistedState] = useState<PersistedStateV1 | null>(() => loadPersistedState());
+  const [currentScreen, setCurrentScreen] = useState<Screen>(() => resolveInitialScreen(persistedState));
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved ? saved === 'dark' : true;
   });
   const [cameraStatus, setCameraStatus] = useState<'idle' | 'live' | 'denied'>('idle');
   const [isScanning, setIsScanning] = useState(false);
-  const [detections, setDetections] = useState<DetectionObject[]>([]);
-  const [showProceed, setShowProceed] = useState(false);
+  const [detections, setDetections] = useState<DetectionObject[]>(() => persistedState?.detections ?? []);
+  const [showProceed, setShowProceed] = useState(() => persistedState?.showProceed ?? (persistedState?.detections?.length ?? 0) > 0);
   
-  const [persona, setPersona] = useState<WitnessPersona | null>(null);
+  const [persona, setPersona] = useState<WitnessPersona | null>(() => persistedState?.persona ?? null);
   const [isGeneratingPersona, setIsGeneratingPersona] = useState(false);
-  const [contradictionCount, setContradictionCount] = useState(0);
+  const [contradictionCount, setContradictionCount] = useState(() => persistedState?.contradictionCount ?? 0);
   const [caughtContradictions, setCaughtContradictions] = useState<{ quote1: string, quote2: string }[]>([]);
   const [selectedContradiction, setSelectedContradiction] = useState<string | null>(null);
   
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(() => persistedState?.messages ?? []);
   const [userInput, setUserInput] = useState('');
-  const [timeLeft, setTimeLeft] = useState(180); // 3 minutes
+  const [timeLeft, setTimeLeft] = useState(() => {
+    const base = persistedState?.timeLeft ?? 180;
+    const elapsed = persistedState ? Math.floor((Date.now() - persistedState.savedAt) / 1000) : 0;
+    return Math.max(0, base - elapsed);
+  }); // 3 minutes
   const [isInterrogating, setIsInterrogating] = useState(false);
-  const [witnessQuote, setWitnessQuote] = useState<string | null>(null);
-  const [analysisError, setAnalysisError] = useState(false);
+  const [witnessQuote, setWitnessQuote] = useState<string | null>(() => persistedState?.witnessQuote ?? null);
+  const [analysisError, setAnalysisError] = useState(() => persistedState?.analysisError ?? false);
   const [lastMessageTime, setLastMessageTime] = useState(Date.now());
   const [shortMessageCount, setShortMessageCount] = useState(0);
 
-  const [accusationOptions, setAccusationOptions] = useState<{ suspects: string[], methods: string[], motives: string[] } | null>(null);
-  const [selectedSuspect, setSelectedSuspect] = useState<string | null>(null);
-  const [selectedMotive, setSelectedMotive] = useState<string | null>(null);
-  const [selectedMethod, setSelectedMethod] = useState<string | null>(null);
-  const [verdict, setVerdict] = useState<{ correct: boolean, verdict: string, explanation: string } | null>(null);
-  const [timeline, setTimeline] = useState<string[]>([]);
+  const [accusationOptions, setAccusationOptions] = useState<AccusationOptions | null>(() => persistedState?.accusationOptions ?? null);
+  const [selectedSuspect, setSelectedSuspect] = useState<string | null>(() => persistedState?.selectedSuspect ?? null);
+  const [selectedMotive, setSelectedMotive] = useState<string | null>(() => persistedState?.selectedMotive ?? null);
+  const [selectedMethod, setSelectedMethod] = useState<string | null>(() => persistedState?.selectedMethod ?? null);
+  const [verdict, setVerdict] = useState<Verdict | null>(() => persistedState?.verdict ?? null);
+  const [timeline, setTimeline] = useState<string[]>(() => persistedState?.timeline ?? []);
   const [isSafetyFlagged, setIsSafetyFlagged] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -113,6 +210,46 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [isDark]);
+
+  useEffect(() => {
+    persistState({
+      version: 1,
+      savedAt: Date.now(),
+      currentScreen,
+      detections,
+      showProceed,
+      persona,
+      messages,
+      timeLeft,
+      contradictionCount,
+      lastMessageTime,
+      witnessQuote,
+      analysisError,
+      accusationOptions,
+      selectedSuspect,
+      selectedMotive,
+      selectedMethod,
+      verdict,
+      timeline,
+    });
+  }, [
+    currentScreen,
+    detections,
+    showProceed,
+    persona,
+    messages,
+    timeLeft,
+    contradictionCount,
+    lastMessageTime,
+    witnessQuote,
+    analysisError,
+    accusationOptions,
+    selectedSuspect,
+    selectedMotive,
+    selectedMethod,
+    verdict,
+    timeline,
+  ]);
 
   const startCamera = async () => {
     try {
@@ -742,6 +879,7 @@ export default function App() {
                   onKeyPress={(e) => {
                   if (e.key !== 'Enter') return;
                   if (liveConnected && userInput.trim()) {
+                    if (liveStatus === 'witness_speaking') liveAudioPlayerRef.current?.stop();
                     sendLiveText(userInput.trim());
                     setUserInput('');
                   } else if (!liveConnected) sendMessage();
@@ -752,7 +890,10 @@ export default function App() {
                 <button
                   onClick={() => {
                     if (liveConnected) {
-                      if (userInput.trim()) sendLiveText(userInput.trim());
+                      if (userInput.trim()) {
+                        if (liveStatus === 'witness_speaking') liveAudioPlayerRef.current?.stop();
+                        sendLiveText(userInput.trim());
+                      }
                       setUserInput('');
                     } else {
                       sendMessage();
@@ -974,7 +1115,10 @@ export default function App() {
                 </section>
 
                 <button
-                  onClick={() => window.location.reload()}
+                  onClick={() => {
+                    try { localStorage.removeItem(STORAGE_KEY); } catch {}
+                    window.location.reload();
+                  }}
                   className="w-full font-display text-xs tracking-[5px] text-ink uppercase bg-surface border border-border py-5 active:bg-surface2 transition-all"
                 >
                   NEW INVESTIGATION

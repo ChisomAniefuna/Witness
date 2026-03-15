@@ -8,14 +8,16 @@ FastAPI WebSocket service for real-time voice interrogation of the Witness agent
 - **Orchestration**: ADK `Runner`, `LiveRequestQueue`, and LLM Flow handle session lifecycle, message ordering, and protocol translation.
 - **AI**: Gemini Live API (native audio model) provides real-time, low-latency voice with VAD and transcription.
 
-**Seamless conversation (per official Bidi docs):** We use the Live API’s **automatic Voice Activity Detection (VAD)** so turn-taking is natural—you speak, pause when done, and the model responds. No client-side activity signals; the server detects when you finish speaking. You can interrupt the witness anytime (client stops playback on `interrupted`). Input is sent in **30 ms** chunks; playback uses a **120 ms** buffer.
+**Seamless conversation (per official Bidi docs):** We use the Live API’s **automatic Voice Activity Detection (VAD)** so turn-taking is natural—you speak, pause when done, and the model responds. No client-side activity signals; the server detects when you finish speaking. You can interrupt the witness anytime (client stops playback on `interrupted`). Input is sent in **20 ms** chunks; playback uses an **80 ms** buffer.
+
+**Status:** Live currently runs a single witness agent. Full multi-agent ADK orchestration is deferred.
 
 **Audio specs:**
 
 | Direction | Format | Notes |
 |-----------|--------|--------|
-| Input (mic → model) | 16-bit PCM, mono, 16 kHz | 30 ms chunks. Stream continuously; server VAD detects end of speech. |
-| Output (model → playback) | 16-bit PCM, mono, 24 kHz | 120 ms buffer on the client. |
+| Input (mic → model) | 16-bit PCM, mono, 16 kHz | 20 ms chunks. Stream continuously; server VAD detects end of speech. |
+| Output (model → playback) | 16-bit PCM, mono, 24 kHz | 80 ms buffer on the client. |
 
 ## References
 

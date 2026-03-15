@@ -11,3 +11,5 @@ live/.env
 **/__pycache__/
 *.pyc
 resources/
+node_modules/
+.vscode/

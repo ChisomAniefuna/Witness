@@ -146,7 +146,7 @@
     }
 
     var audioAccumulator = { buffers: [], totalBytes: 0, sampleRate: 24000 };
-    var MIN_BUFFER_MS = 120;
+    var MIN_BUFFER_MS = 80;
 
     function flushAudioAccumulator() {
       if (audioAccumulator.buffers.length === 0) return;
@@ -332,7 +332,7 @@
         const processor = ctx.createScriptProcessor(4096, 1, 1);
         micProcessor = processor;
         const targetRate = 16000;
-        const chunkMs = 30;
+        const chunkMs = 20;
         const samplesPerChunk = Math.floor((targetRate / 1000) * chunkMs);
         let buffer = [];
         processor.onaudioprocess = (e) => {

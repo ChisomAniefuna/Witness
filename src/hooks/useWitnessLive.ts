@@ -10,6 +10,10 @@ const SAMPLE_RATE_TARGET = 16000;
 const SAMPLE_RATE_DEFAULT = 48000;
 /** 20ms chunks for slightly lower latency (server gets audio sooner). */
 const CHUNK_MS = 20;
+const BARGE_IN_COOLDOWN_MS = 350;
+const BARGE_IN_BASE_RMS = 0.04;
+const BARGE_IN_NOISE_MULT = 3.5;
+const BARGE_IN_PEAK_MULT = 1.4;
 
 /** Downsample Float32Array (e.g. 48k) to 16k and convert to Int16 PCM. */
 function toPcm16k(float32: Float32Array, sourceSampleRate: number): ArrayBuffer {
@@ -130,7 +134,7 @@ function decodeAudioData(data: string | number[]): ArrayBuffer | null {
 }
 
 // Buffer before playing: larger = smoother playback, less crackling; smaller = lower latency. We flush on turn_complete so tail doesn't get stuck.
-const MIN_BUFFER_MS = 100;
+const MIN_BUFFER_MS = 80;
 
 /** Create a simple queue-based PCM player for witness audio (e.g. 24 kHz from Gemini). Buffers to reduce crackling. */
 export function createLiveAudioPlayer(): {
@@ -178,7 +182,7 @@ export function createLiveAudioPlayer(): {
       playNext();
       return;
     }
-    if (!ctx) ctx = new AudioContext({ sampleRate });
+    if (!ctx) ctx = new AudioContext({ sampleRate, latencyHint: 'interactive' });
     // Resume if suspended (browser autoplay policy)
     if (ctx.state === 'suspended') ctx.resume();
     const int16 = new Int16Array(buffer);
@@ -288,6 +292,7 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
   const enableMicRef = useRef(false);
   const sendAudioRef = useRef<(base64: string) => void>(() => {});
   const lastLocalInterruptMsRef = useRef(0);
+  const noiseFloorRef = useRef(0.01);
 
   const setStatusSafe = useCallback((next: typeof statusRef.current) => {
     statusRef.current = next;
@@ -306,6 +311,8 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
     audioContextRef.current?.close().catch(() => {});
     audioContextRef.current = null;
     initSentRef.current = false;
+    noiseFloorRef.current = 0.01;
+    lastLocalInterruptMsRef.current = 0;
     setConnected(false);
     setStatusSafe('idle');
     setError(null);
@@ -313,13 +320,19 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
 
   const startMicCapture = useCallback((sendAudioChunk: (base64: string) => void) => {
     navigator.mediaDevices
-      .getUserMedia({ audio: true })
+      .getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
       .then((stream) => {
         mediaStreamRef.current = stream;
-        const ctx = new AudioContext({ sampleRate: SAMPLE_RATE_DEFAULT });
+        const ctx = new AudioContext({ sampleRate: SAMPLE_RATE_DEFAULT, latencyHint: 'interactive' });
         audioContextRef.current = ctx;
         const source = ctx.createMediaStreamSource(stream);
-        const bufferSize = 4096;
+        const bufferSize = 2048;
         const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
         processorRef.current = processor;
         let buffer: number[] = [];
@@ -329,15 +342,24 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
           // Local barge-in: if the witness is speaking and we detect user speech, stop playback immediately.
           // This avoids waiting for a server-side "interrupted" event which can arrive late.
           let maxAbs = 0;
+          let sumSq = 0;
           for (let i = 0; i < input.length; i++) {
             const v = Math.abs(input[i]!);
             if (v > maxAbs) maxAbs = v;
+            sumSq += v * v;
           }
+          const rms = input.length ? Math.sqrt(sumSq / input.length) : 0;
+          if (statusRef.current !== 'witness_speaking') {
+            const next = noiseFloorRef.current * 0.9 + rms * 0.1;
+            noiseFloorRef.current = Math.max(0.003, next);
+          }
+          const adaptive = Math.max(BARGE_IN_BASE_RMS, noiseFloorRef.current * BARGE_IN_NOISE_MULT);
           const now = Date.now();
           if (
             statusRef.current === 'witness_speaking' &&
-            maxAbs > 0.08 &&
-            now - lastLocalInterruptMsRef.current > 500
+            rms > adaptive &&
+            maxAbs > adaptive * BARGE_IN_PEAK_MULT &&
+            now - lastLocalInterruptMsRef.current > BARGE_IN_COOLDOWN_MS
           ) {
             lastLocalInterruptMsRef.current = now;
             onInterrupted?.();
