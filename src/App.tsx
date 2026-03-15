@@ -7,6 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Camera, Eye, Mic, Scale, FileText, ChevronLeft, Sun, Moon, AlertCircle } from 'lucide-react';
 import { analyzeScene, generateWitnessPersona, getInterrogationResponse, detectContradiction, checkSafety, getEngagementResponse, getAccusationOptions, evaluateAccusation, generateCaseFileTimeline, WitnessPersona } from './services/geminiService';
+import { useWitnessLive, createLiveAudioPlayer } from './hooks/useWitnessLive';
 
 type Screen = 'splash' | 'onboarding' | 'camera' | 'witness' | 'interrogation' | 'accusation' | 'casefile';
 
@@ -65,6 +66,43 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const liveAudioPlayerRef = useRef(createLiveAudioPlayer());
+  const liveKickoffPendingRef = useRef(false);
+
+  const {
+    connected: liveConnected,
+    error: liveError,
+    status: liveStatus,
+    startLive,
+    stopLive,
+    sendText: sendLiveText,
+  } = useWitnessLive({
+    onUserTranscript: (text) => setMessages((prev) => [...prev, { role: 'user', text }]),
+    onWitnessTranscript: (text) => {
+      setMessages((prev) => {
+        const next = [...prev, { role: 'witness', text }];
+        const lastIdx = next.length - 1;
+        detectContradiction(next).then((r) => {
+          if (r.contradiction) {
+            setContradictionCount((c) => c + 1);
+            setMessages((m) =>
+              m.map((msg, i) => (i === lastIdx ? { ...msg, isContradiction: true, contradictionQuote: r.quote } : msg))
+            );
+          }
+        });
+        return next;
+      });
+    },
+    onAudioChunk: (base64, mimeType) => liveAudioPlayerRef.current?.playChunk(base64, mimeType),
+    onInterrupted: () => liveAudioPlayerRef.current?.stop(),
+    onTurnComplete: () => liveAudioPlayerRef.current?.flush(),
+    onReady: () => {
+      if (!liveKickoffPendingRef.current) return;
+      liveKickoffPendingRef.current = false;
+      // Slight delay so the connection feels responsive, but doesn't overlap the initial handshake.
+      window.setTimeout(() => sendLiveText('Begin interrogation.'), 500);
+    },
+  });
 
   const toggleTheme = () => {
     setIsDark(prev => !prev);
@@ -462,6 +500,38 @@ export default function App() {
           </motion.div>
         )}
 
+        {currentScreen === 'witness' && !persona && isGeneratingPersona && (
+          <motion.div
+            key="witness-loading"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-10 flex flex-col bg-bg items-center justify-center px-6"
+          >
+            <div className="w-full max-w-md border border-border bg-surface p-6 shadow-[0_18px_45px_rgba(0,0,0,0.5)]">
+              <div className="flex items-center justify-between mb-6">
+                <div className="space-y-2">
+                  <div className="h-3 w-24 bg-border/40 rounded animate-pulse" />
+                  <div className="h-6 w-40 bg-border/30 rounded animate-pulse" />
+                </div>
+                <div className="w-10 h-10 rounded-full border border-red-noir/40 flex items-center justify-center">
+                  <div className="w-2 h-2 rounded-full bg-red-noir animate-pulse" />
+                </div>
+              </div>
+              <div className="h-20 w-full bg-border/20 rounded mb-4 animate-pulse" />
+              <div className="grid grid-cols-2 gap-3 mb-8">
+                <div className="h-14 bg-border/10 rounded animate-pulse" />
+                <div className="h-14 bg-border/10 rounded animate-pulse" />
+                <div className="col-span-2 h-14 bg-border/10 rounded animate-pulse" />
+              </div>
+              <div className="h-10 w-full bg-red-noir/60 rounded animate-pulse" />
+            </div>
+            <div className="mt-6 font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
+              Locating witness profile…
+            </div>
+          </motion.div>
+        )}
+
         {currentScreen === 'witness' && persona && (
           <motion.div
             key="witness"
@@ -601,6 +671,48 @@ export default function App() {
             </div>
 
             <div className="bg-surface border-t border-border p-4 pb-24">
+              {/* Voice toggle */}
+              <div className="flex items-center gap-2 mb-4">
+                <button
+                  type="button"
+                  onClick={() =>
+                    liveConnected
+                      ? (liveAudioPlayerRef.current.flush(), stopLive())
+                      : (liveKickoffPendingRef.current = true,
+                        startLive(
+                          {
+                            name: persona.name,
+                            archetype: persona.archetype,
+                            age: persona.age,
+                            occupation: persona.occupation,
+                            tells: persona.tells,
+                            openingStatement: persona.openingStatement,
+                            guiltyOf: persona.guiltyOf,
+                            secret: persona.secret,
+                          },
+                          detections.map((d) => d.label),
+                          true
+                        ))
+                  }
+                  className={`font-mono text-[9px] tracking-[2px] px-3 py-2 border uppercase flex items-center gap-2 ${
+                    liveConnected
+                      ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                      : 'border-border text-ink3 hover:border-red-noir/50'
+                  }`}
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  {liveConnected ? 'Stop voice' : 'Start voice interrogation'}
+                </button>
+                {liveConnected && (
+                  <span className="font-mono text-[8px] text-ink4 uppercase">
+                    {liveStatus === 'witness_speaking' ? 'Witness speaking…' : 'Listening…'}
+                  </span>
+                )}
+                {liveError && (
+                  <span className="font-mono text-[8px] text-red-noir uppercase">{liveError}</span>
+                )}
+              </div>
+
               {/* Evidence Strip */}
               <div className="flex gap-2 mb-4 overflow-x-auto pb-2 no-scrollbar border-b border-border/30">
                 {detections.map((obj, i) => (
@@ -627,12 +739,25 @@ export default function App() {
                   type="text"
                   value={userInput}
                   onChange={(e) => setUserInput(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                  placeholder="Ask the witness..."
+                  onKeyPress={(e) => {
+                  if (e.key !== 'Enter') return;
+                  if (liveConnected && userInput.trim()) {
+                    sendLiveText(userInput.trim());
+                    setUserInput('');
+                  } else if (!liveConnected) sendMessage();
+                }}
+                  placeholder={liveConnected ? 'Ask the witness (or speak)...' : 'Ask the witness...'}
                   className="w-full bg-bg border border-border px-4 py-3 font-serif text-sm text-ink placeholder:text-ink4 focus:outline-none focus:border-red-noir/50 transition-all"
                 />
                 <button
-                  onClick={sendMessage}
+                  onClick={() => {
+                    if (liveConnected) {
+                      if (userInput.trim()) sendLiveText(userInput.trim());
+                      setUserInput('');
+                    } else {
+                      sendMessage();
+                    }
+                  }}
                   className="absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[9px] tracking-[2px] text-red-noir px-3 py-1"
                 >
                   SEND
@@ -671,6 +796,29 @@ export default function App() {
                 </motion.div>
               )}
             </AnimatePresence>
+          </motion.div>
+        )}
+
+        {currentScreen === 'accusation' && !accusationOptions && (
+          <motion.div
+            key="accusation-loading"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-10 flex flex-col bg-bg items-center justify-center px-6"
+          >
+            <div className="w-full max-w-md border border-border bg-surface p-6 shadow-[0_18px_45px_rgba(0,0,0,0.5)] space-y-4">
+              <div className="h-4 w-40 bg-border/40 rounded animate-pulse" />
+              <div className="grid grid-cols-2 gap-3">
+                <div className="h-10 bg-border/15 rounded animate-pulse" />
+                <div className="h-10 bg-border/15 rounded animate-pulse" />
+                <div className="col-span-2 h-10 bg-border/15 rounded animate-pulse" />
+              </div>
+              <div className="h-10 w-full bg-red-noir/60 rounded animate-pulse" />
+            </div>
+            <div className="mt-6 font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
+              Building accusation options…
+            </div>
           </motion.div>
         )}
 
@@ -746,6 +894,25 @@ export default function App() {
               >
                 SUBMIT VERDICT
               </button>
+            </div>
+          </motion.div>
+        )}
+
+        {currentScreen === 'casefile' && !verdict && (
+          <motion.div
+            key="casefile-loading"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-10 flex flex-col bg-bg items-center justify-center px-6"
+          >
+            <div className="w-full max-w-md border border-border bg-surface p-6 shadow-[0_18px_45px_rgba(0,0,0,0.5)] space-y-4">
+              <div className="h-4 w-48 bg-border/40 rounded animate-pulse" />
+              <div className="h-16 w-full bg-border/15 rounded animate-pulse" />
+              <div className="h-16 w-full bg-border/15 rounded animate-pulse" />
+            </div>
+            <div className="mt-6 font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
+              Compiling case file…
             </div>
           </motion.div>
         )}
