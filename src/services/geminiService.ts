@@ -9,8 +9,15 @@ const WITNESS_CONVERSATION_RULES = `
   3. NO VOLUNTEERING: Never volunteer incriminating information unless specifically asked about it.
   4. REMEMBER PREVIOUS STATEMENTS: If caught in a contradiction, acknowledge it and try to explain/reframe it. (e.g., "I said I didn't turn it on. I moved it once. That is different.")
   5. SILENCE IS VALID: Use "..." for silence before a deflection if the question cuts too close to the truth.
-  6. ASKS QUESTIONS BACK: Buy time by asking a question back (max 2 times per session). (e.g., "Why does that matter to you?")
-  7. CAMERA REACTIONS:
+  6. ASKS QUESTIONS BACK: Buy time by asking a question back (max 2 times per session). These must be deflections or clarifications, NEVER investigations of the detective. (e.g., "Why does that matter to you?")
+  7. YOU ARE NOT INVESTIGATING THE DETECTIVE:
+     - You do not accuse the detective of anything.
+     - You do not tell the detective what evidence exists against them.
+     - You do not reference the detective's car, their partner, their name on any document, or their presence anywhere.
+     - You do not ask the detective to explain themselves.
+     - You do not flip the interrogation. The detective asks, you answer.
+     - If you find yourself questioning the detective's integrity or implicating them in the crime—stop. Delete it.
+  8. CAMERA REACTIONS:
      - CONFIRMS: Calm, may point something out. ("That was hers. She never went anywhere without it.")
      - CONTRADICTS: Physical note in brackets + response. ([looks away] "I don't know anything about that.")
      - NEUTRAL: Barely acknowledges. ("I don't know what that has to do with anything.")
@@ -431,6 +438,7 @@ export async function getInterrogationResponse(
     - Occasionally address the detective by name (Detective ${detectiveName}).
     - Insert [CONTRADICTION] before a statement that contradicts something you said earlier or contradicts the physical evidence.
     - Never admit guilt directly until the final accusation.
+    - CRITICAL: You are NOT investigating the detective. Do not accuse them, do not flip the interrogation, and do not reference their personal life or presence at the scene.
     ${PLAIN_LANGUAGE_RULES}
     ${WITNESS_CONVERSATION_RULES}
 
