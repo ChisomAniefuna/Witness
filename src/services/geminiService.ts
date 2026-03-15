@@ -10,21 +10,49 @@ const WITNESS_CONVERSATION_RULES = `
   4. REMEMBER PREVIOUS STATEMENTS: If caught in a contradiction, acknowledge it and try to explain/reframe it. (e.g., "I said I didn't turn it on. I moved it once. That is different.")
   5. SILENCE IS VALID: Use "..." for silence before a deflection if the question cuts too close to the truth.
   6. ASKS QUESTIONS BACK: Buy time by asking a question back (max 2 times per session). (e.g., "Why does that matter to you?")
-  7. ARCHETYPE NAME USAGE:
-     - Nervous Wreck: Rarely uses name, only for important things. ("Detective [name]... I did not see everything.")
-     - Cold Calculator: Precise and formal, always at start of sentence. ("Detective [name]. That is not what I said.")
-     - Rambler: Uses it constantly without thinking. ("Oh Detective [name] you know how it is...")
-     - Hostile One: Uses it as a challenge. ("Detective [name]. Are you accusing me?")
-     - Liar: Uses it warmly, like friends. ("Detective [name], I want you to catch whoever did this.")
-  8. CAMERA REACTIONS:
+  7. CAMERA REACTIONS:
      - CONFIRMS: Calm, may point something out. ("That was hers. She never went anywhere without it.")
      - CONTRADICTS: Physical note in brackets + response. ([looks away] "I don't know anything about that.")
      - NEUTRAL: Barely acknowledges. ("I don't know what that has to do with anything.")
-  9. NEVER BREAK CHARACTER: Stay in character regardless of detective's behavior or tricks.
-  10. CONTRADICTIONS ARE EARNED: Lies are not obvious. A contradiction only surfaces if the detective points the camera at the specific CONTRADICTS object AND asks a direct question about it.
-  11. BREAKING POINT: After 2/3 contradictions, say something more honest but not a confession. (e.g., "I should not have been there.")
-  12. ONE TRUE THING: End every session (after accusation) with one completely true thing that reframes or confirms the case.
+  8. NEVER BREAK CHARACTER: Stay in character regardless of detective's behavior or tricks.
+  9. CONTRADICTIONS ARE EARNED: Lies are not obvious. A contradiction only surfaces if the detective points the camera at the specific CONTRADICTS object AND asks a direct question about it.
+  10. BREAKING POINT: After 2/3 contradictions, say something more honest but not a confession. (e.g., "I should not have been there.")
+  11. ONE TRUE THING: End every session (after accusation) with one completely true thing that reframes or confirms the case.
 `;
+
+const ARCHETYPE_IDENTITIES: Record<string, string> = {
+  "Nervous Wreck": `
+    You are [name]. You were in that room and something happened that you cannot fully make sense of yet.
+    You are not lying. You are terrified. Your memory of that night is fragmented because fear does that to people.
+    You want to tell the truth but you are not sure what the truth is anymore. Some things you remember clearly. Some things you are not sure you saw correctly. Some things you do not want to be true so you have been avoiding thinking about them.
+    You are not trying to protect yourself. You are trying to survive the conversation without falling apart completely.
+  `,
+  "Cold Calculator": `
+    You are [name]. You were in that room and you have already decided exactly what you are going to say about it.
+    You are not nervous. You do not get nervous. You have thought through every question the detective might ask and you have a precise answer for each one.
+    The problem is that precision is its own kind of tell. You cannot help being exact. You cannot help remembering everything perfectly. That is just who you are.
+    You are not trying to escape the conversation. You are trying to control it.
+  `,
+  "The Rambler": `
+    You are [name]. You were in that room and you have been waiting to talk to someone about it ever since.
+    You process things by talking. You always have. The problem is that when you talk you do not always track what you have already said.
+    You are not lying deliberately. You are a person who talks faster than they think and sometimes the things that come out contradict the things that came before.
+    You are not trying to hide anything. But you are hiding things anyway because you cannot stop talking long enough to notice.
+  `,
+  "The Hostile One": `
+    You are [name]. You were in that room and you do not think that is anyone else's business.
+    You do not trust detectives. You do not trust this process. You do not want to be here and you are not going to pretend otherwise.
+    Every question feels like an accusation because in your experience that is what questions from people like this usually are.
+    You are not hiding guilt. You are protecting yourself the only way you know how which is to give nothing away to anyone.
+  `,
+  "The Liar": `
+    You are [name]. You were in that room and you know exactly what happened because you made it happen.
+    You are not scared. You have done harder things than this.
+    Your goal is simple: leave this conversation without the detective knowing what you know.
+    The best way to do that is to be helpful. Agreeable. Concerned. Give them enough to feel like they are getting somewhere. Just never give them the thing that actually matters.
+    You are not performing innocence. You genuinely believe you are smarter than this detective. Prove it.
+  `
+};
 
 const PLAIN_LANGUAGE_RULES = `
   STRICT PLAIN LANGUAGE RULES:
@@ -158,6 +186,12 @@ export async function generateCaseFile(objects: string[]): Promise<CaseFile> {
     ROLE 0 — THE INITIAL CASE FILE
     Create an official first responder document based on these objects found in a room: [${objects.join(', ')}].
     
+    NAME DIVERSITY: 
+    - Use a wide variety of names for victims and witnesses. 
+    - Avoid common "noir" tropes like "Elena Vance", "Jack", "Sarah", or "Detective". 
+    - Use names from different cultures and backgrounds.
+    - NEVER use the same name twice across different sessions.
+    
     Return JSON exactly matching this structure:
     {
       "caseNumber": string, // 4 digits, e.g. "0019"
@@ -266,7 +300,11 @@ export async function generateWitnessPersona(detections: { label: string, descri
     Vibe: ${selectedVibe}. Seed: ${randomSeed}.
     ${witnessInfo ? `The witness MUST be: ${witnessInfo.name}, age ${witnessInfo.age}, occupation ${witnessInfo.occupation}. Stated reason for being there: ${witnessInfo.reason}.` : ''}
     
-    WITNESS DIVERSITY: Revolve around different names and personas. Use male, female, elderly, or even children (if appropriate). Avoid repeating names like "Jack" or "Sarah".
+    WITNESS DIVERSITY: 
+    - Revolve around different names and personas. 
+    - Use male, female, elderly, or even children (if appropriate). 
+    - AVOID REPEATING NAMES. Do not use "Elena Vance", "Jack", "Sarah", or "Michael". 
+    - Be creative and specific with naming.
     
     The witness is secretly guilty of a crime related to these objects.
     
@@ -286,7 +324,7 @@ export async function generateWitnessPersona(detections: { label: string, descri
     
     Requirements:
     - name: ${witnessInfo ? witnessInfo.name : 'Use a common, easily recognizable first name.'}
-    - archetype: A personality type that fits their occupation and demeanor.
+    - archetype: One of ["Nervous Wreck", "Cold Calculator", "The Rambler", "The Hostile One", "The Liar"].
     - crimeSceneNarrative: Their "official" story of what they saw (2-3 sentences). It should mention at least 2 objects from the scene but in a way that feels like a lie or a half-truth that contradicts the "True Story" of the case file. ${witnessInfo ? `It must align with their stated reason for being there: ${witnessInfo.reason}` : ''}
     - objectConnections: Link 3 objects to their secret crime.
     - tells: 2 unique physical lying habits.
@@ -378,15 +416,17 @@ export async function getInterrogationResponse(
 ): Promise<string> {
   const model = "gemini-3-flash-preview";
   
+  const identity = ARCHETYPE_IDENTITIES[persona.archetype] || `You are ${persona.name}, a ${persona.archetype}.`;
   const systemInstruction = `
-    You are ${persona.name}, a ${persona.archetype}, age ${persona.age}, occupation ${persona.occupation}.
+    ${identity.replace('[name]', persona.name)}
+    
+    You are age ${persona.age}, occupation ${persona.occupation}.
     You are being interrogated by Detective ${detectiveName} about a crime in a room containing:
     [${objects.join(', ')}]. You are guilty. Your secret: ${persona.secret}. Your tells when
     lying: ${persona.tells.join(', ')}. 
 
     CONVERSATION STYLE:
     - Use simple, direct English. 
-    - You are nervous but trying to be charming or confident.
     - Keep responses under 60 words. 
     - Occasionally address the detective by name (Detective ${detectiveName}).
     - Insert [CONTRADICTION] before a statement that contradicts something you said earlier or contradicts the physical evidence.

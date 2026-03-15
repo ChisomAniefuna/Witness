@@ -417,19 +417,19 @@ export default function App() {
           time: new Date().toLocaleTimeString(),
           incidentType: 'Unexplained incident. Subject found unconscious.',
           victim: {
-            name: 'Sarah',
-            age: 28,
-            occupation: 'Unidentified',
-            discovery: 'Subject found unconscious on the floor beside the balcony entrance.',
+            name: 'Julian Thorne',
+            age: 34,
+            occupation: 'Software Architect',
+            discovery: 'Subject found slumped over his desk in the home office.',
             condition: 'Unconscious'
           },
-          sceneReport: 'Sarah was found unconscious on the floor beside the balcony entrance at 10:45 PM, a glass still in her hand. The fan was running at full speed despite the cold evening air coming through the gap in the drape — someone wanted the noise. The drape itself had been pulled from one side only, from the inside, as if someone was watching the garden below before they left. The balcony door is locked from the inside, which means whoever was watching that garden never went through it.',
+          sceneReport: 'Julian Thorne was found slumped over his desk at 02:15 AM, a half-finished energy drink nearby. The window was slightly ajar, letting in a draft that rustled the papers on the floor — someone was looking for something specific. The desk lamp was the only light source, casting long shadows that hid the missing hard drive. The door was locked from the inside, but the window lock shows signs of tampering from the exterior.',
           witnessOnScene: {
-            name: 'Mrs. Gable',
-            age: 72,
-            occupation: 'Neighbor',
-            reason: 'She heard a loud thud from the unit next door.',
-            demeanor: 'Witness was cooperative and calm. Did not ask about the victim\'s condition.'
+            name: 'Elias Vance',
+            age: 29,
+            occupation: 'Delivery Driver',
+            reason: 'He was dropping off a late-night package and saw the open window.',
+            demeanor: 'Witness was helpful but kept checking his watch. Avoided looking at the desk.'
           },
           assignedDate: new Date().toLocaleString()
         };
@@ -521,43 +521,43 @@ export default function App() {
       // Fallback pool
       const fallbacks: WitnessPersona[] = [
         {
-          name: 'JACK',
-          archetype: 'The Nervous Wreck',
-          age: 42,
-          occupation: 'Night Watchman',
-          tells: ['Twitching eye', 'Wringing hands'],
-          openingStatement: '"I was here when it happened. I heard everything. I saw him leave. At least… I think that\'s what I saw."',
-          guiltyOf: 'Accidental Manslaughter',
-          secret: 'He was sleeping on the job when the crime occurred.',
-          crimeSceneNarrative: 'I was just doing my rounds when I saw a shadow near the window. By the time I got there, it was too late.',
+          name: 'MARCUS',
+          archetype: 'Nervous Wreck',
+          age: 38,
+          occupation: 'Janitor',
+          tells: ['Tapping foot', 'Wiping forehead'],
+          openingStatement: '"I... I was just cleaning up. I didn\'t see anything. I swear. I just found the door open."',
+          guiltyOf: 'Theft',
+          secret: 'He was stealing expensive cleaning supplies when he found the body.',
+          crimeSceneNarrative: 'I was just doing my rounds when I saw the light on. I went in to turn it off and... well, you saw it.',
           objectConnections: [],
-          avatarUrl: 'https://picsum.photos/seed/jack/400/400'
+          avatarUrl: 'https://picsum.photos/seed/marcus/400/400'
         },
         {
-          name: 'SARAH',
-          archetype: 'The Cold Socialite',
-          age: 29,
-          occupation: 'Art Dealer',
-          tells: ['Adjusting pearls', 'Checking watch'],
-          openingStatement: '"This is all so... inconvenient. I have a gallery opening in an hour. Can we make this quick?"',
-          guiltyOf: 'Grand Larceny',
-          secret: 'She swapped the original painting for a forgery years ago.',
-          crimeSceneNarrative: 'I was simply admiring the collection when the lights flickered. When they came back on, the room was in disarray.',
+          name: 'BEATRICE',
+          archetype: 'Cold Calculator',
+          age: 31,
+          occupation: 'Jewelry Designer',
+          tells: ['Twirling ring', 'Looking at nails'],
+          openingStatement: '"This is quite a mess, isn\'t it? I hope you can resolve this quickly. I have a flight to catch."',
+          guiltyOf: 'Smuggling',
+          secret: 'She was using the victim\'s business to move illegal gems.',
+          crimeSceneNarrative: 'I was here to discuss a commission. The victim seemed agitated, then the lights went out. I left immediately.',
           objectConnections: [],
-          avatarUrl: 'https://picsum.photos/seed/sarah/400/400'
+          avatarUrl: 'https://picsum.photos/seed/beatrice/400/400'
         },
         {
-          name: 'MICHAEL',
-          archetype: 'The Bitter Academic',
-          age: 58,
-          occupation: 'History Professor',
-          tells: ['Polishing glasses', 'Clearing throat'],
-          openingStatement: '"History repeats itself, detective. Usually as a tragedy. This room... it feels like a tomb."',
-          guiltyOf: 'Blackmail',
-          secret: 'He was being paid to keep quiet about a local scandal.',
-          crimeSceneNarrative: 'I was researching in the library when I heard a struggle. I didn\'t want to get involved. I\'ve seen enough trouble.',
+          name: 'SILAS',
+          archetype: 'The Hostile One',
+          age: 62,
+          occupation: 'Librarian',
+          tells: ['Adjusting tie', 'Coughing'],
+          openingStatement: '"Knowledge is a burden, detective. Sometimes it\'s better not to know what happens behind closed doors."',
+          guiltyOf: 'Forgery',
+          secret: 'He was forging rare manuscripts in the basement.',
+          crimeSceneNarrative: 'I was in the stacks when I heard a loud noise. I didn\'t investigate. I\'ve learned to mind my own business.',
           objectConnections: [],
-          avatarUrl: 'https://picsum.photos/seed/michael/400/400'
+          avatarUrl: 'https://picsum.photos/seed/silas/400/400'
         }
       ];
       const fallback = fallbacks[Math.floor(Math.random() * fallbacks.length)];
@@ -1171,13 +1171,6 @@ export default function App() {
                 <div className="absolute -right-20 -top-20 w-64 h-64 rounded-full border border-red-noir/5" />
               </div>
 
-              {/* Vertical Rail Text */}
-              <div className="absolute left-6 top-1/2 -translate-y-1/2 h-40 flex items-center justify-center pointer-events-none">
-                <div className="rotate-180 [writing-mode:vertical-rl] font-mono text-[9px] tracking-[6px] text-ink4 uppercase opacity-40">
-                  DOSSIER • {persona.archetype} • DOSSIER
-                </div>
-              </div>
-
               {/* Confidential Stamp */}
               <div className="absolute top-8 right-8 pointer-events-none">
                 <div className="border-2 border-red-noir/40 px-3 py-1.5 rotate-12 flex flex-col items-center">
@@ -1732,7 +1725,7 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <div className="w-1.5 h-1.5 rounded-full bg-red-noir animate-breathe" />
                   <span className="font-mono text-[9px] tracking-[3px] text-greenbr uppercase">
-                    {isScanning ? 'SCANNING' : 'LIVE'}
+                    {isScanning ? 'ANALYZING' : 'LIVE'}
                   </span>
                   {analysisError && (
                     <span className="ml-2 font-mono text-[8px] tracking-[1px] text-red-noir bg-red-noir/10 px-2 py-0.5 border border-red-noir/30">
@@ -1796,7 +1789,7 @@ export default function App() {
 
               <div className="font-serif text-[clamp(14px,4vw,16px)] font-light italic text-ink2 leading-relaxed mb-4 pl-4 border-l-2 border-redmute min-h-[52px]">
                 {isScanning ? (
-                  '"Scanning the scene."'
+                  '...'
                 ) : witnessQuote ? (
                   `"${witnessQuote}"`
                 ) : detections.length > 0 ? (
@@ -1821,17 +1814,7 @@ export default function App() {
 
               {!showProceed && (
                 <div className="flex items-center justify-center gap-6 py-2">
-                  <div className="flex-1 text-center">
-                    {isScanning && (
-                      <motion.span 
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        className="font-mono text-[8px] tracking-[3px] text-red-noir uppercase animate-pulse"
-                      >
-                        Scanning...
-                      </motion.span>
-                    )}
-                  </div>
+                  <div className="flex-1 text-center" />
                   <button
                     onClick={captureScene}
                     className={`w-16 h-16 rounded-full border-4 border-ink2 flex items-center justify-center transition-all active:scale-90 relative ${isScanning ? 'cursor-not-allowed' : 'cursor-pointer'}`}
