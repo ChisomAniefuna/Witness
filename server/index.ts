@@ -1,7 +1,7 @@
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import { GoogleGenAI, Type } from "@google/genai";
+import express from 'express';
+import dotenv from 'dotenv';
+import cors from 'cors';
+import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -9,17 +9,17 @@ const app = express();
 const port = process.env.PORT || 8080;
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: '10mb' }));
 
 const apiKey = process.env.GEMINI_API_KEY;
 
 if (!apiKey) {
   console.warn(
-    "GEMINI_API_KEY is not set. Requests to Gemini will fail until you configure it."
+    'GEMINI_API_KEY is not set. Requests to Gemini will fail until you configure it.'
   );
 }
 
-const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+const ai = new GoogleGenAI({ apiKey: apiKey || '' });
 
 // ── Prompt constants ────────────────────────────────────────────────────────
 
@@ -49,31 +49,31 @@ const WITNESS_CONVERSATION_RULES = `
 `;
 
 const ARCHETYPE_IDENTITIES: Record<string, string> = {
-  "Nervous Wreck": `
+  'Nervous Wreck': `
     You are [name]. You were in that room and something happened that you cannot fully make sense of yet.
     You are not lying. You are terrified. Your memory of that night is fragmented because fear does that to people.
     You want to tell the truth but you are not sure what the truth is anymore. Some things you remember clearly. Some things you are not sure you saw correctly. Some things you do not want to be true so you have been avoiding thinking about them.
     You are not trying to protect yourself. You are trying to survive the conversation without falling apart completely.
   `,
-  "Cold Calculator": `
+  'Cold Calculator': `
     You are [name]. You were in that room and you have already decided exactly what you are going to say about it.
     You are not nervous. You do not get nervous. You have thought through every question the detective might ask and you have a precise answer for each one.
     The problem is that precision is its own kind of tell. You cannot help being exact. You cannot help remembering everything perfectly. That is just who you are.
     You are not trying to escape the conversation. You are trying to control it.
   `,
-  "The Rambler": `
+  'The Rambler': `
     You are [name]. You were in that room and you have been waiting to talk to someone about it ever since.
     You process things by talking. You always have. The problem is that when you talk you do not always track what you have already said.
     You are not lying deliberately. You are a person who talks faster than they think and sometimes the things that come out contradict the things that came before.
     You are not trying to hide anything. But you are hiding things anyway because you cannot stop talking long enough to notice.
   `,
-  "The Hostile One": `
+  'The Hostile One': `
     You are [name]. You were in that room and you do not think that is anyone else's business.
     You do not trust detectives. You do not trust this process. You do not want to be here and you are not going to pretend otherwise.
     Every question feels like an accusation because in your experience that is what questions from people like this usually are.
     You are not hiding guilt. You are protecting yourself the only way you know how which is to give nothing away to anyone.
   `,
-  "The Liar": `
+  'The Liar': `
     You are [name]. You were in that room and you know exactly what happened because you made it happen.
     You are not scared. You have done harder things than this.
     Your goal is simple: leave this conversation without the detective knowing what you know.
@@ -96,18 +96,18 @@ const PLAIN_LANGUAGE_RULES = `
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 
-app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, service: "witness-backend" });
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true, service: 'witness-backend' });
 });
 
-app.post("/api/scene-analyze", async (req, res) => {
+app.post('/api/scene-analyze', async (req, res) => {
   try {
     const { image } = req.body as { image: string };
     if (!image) {
-      return res.status(400).json({ error: "image is required" });
+      return res.status(400).json({ error: 'image is required' });
     }
 
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       You are a forensic scene analyst. The player has pointed their camera at a real room. Analyse the image and return a JSON object with:
       { "objects": [ { "label": string, "x": number, "y": number, "w": number, "h": number, "flagged": boolean, "description": string } ],
@@ -123,15 +123,15 @@ app.post("/api/scene-analyze", async (req, res) => {
             { text: prompt },
             {
               inlineData: {
-                mimeType: "image/jpeg",
-                data: image.split(",")[1] || image,
+                mimeType: 'image/jpeg',
+                data: image.split(',')[1] || image,
               },
             },
           ],
         },
       ],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -150,36 +150,36 @@ app.post("/api/scene-analyze", async (req, res) => {
                   description: { type: Type.STRING },
                 },
                 required: [
-                  "label",
-                  "x",
-                  "y",
-                  "w",
-                  "h",
-                  "flagged",
-                  "description",
+                  'label',
+                  'x',
+                  'y',
+                  'w',
+                  'h',
+                  'flagged',
+                  'description',
                 ],
               },
             },
           },
-          required: ["witnessReaction", "objects"],
+          required: ['witnessReaction', 'objects'],
         },
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("scene-analyze error", err);
-    res.status(500).json({ error: "scene-analyze failed" });
+    console.error('scene-analyze error', err);
+    res.status(500).json({ error: 'scene-analyze failed' });
   }
 });
 
-app.post("/api/witness-persona", async (req, res) => {
+app.post('/api/witness-persona', async (req, res) => {
   try {
     const { objects } = req.body as { objects: string[] };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       You are generating a murder mystery witness for a room that contains:
-      [${objects.join(", ")}]. Generate a JSON persona:
+      [${objects.join(', ')}]. Generate a JSON persona:
       { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
         "guiltyOf": string, "secret": string }
       The witness is guilty. openingStatement is what they say when first
@@ -192,7 +192,7 @@ app.post("/api/witness-persona", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -206,34 +206,30 @@ app.post("/api/witness-persona", async (req, res) => {
             secret: { type: Type.STRING },
           },
           required: [
-            "name",
-            "archetype",
-            "age",
-            "occupation",
-            "tells",
-            "openingStatement",
-            "guiltyOf",
-            "secret",
+            'name',
+            'archetype',
+            'age',
+            'occupation',
+            'tells',
+            'openingStatement',
+            'guiltyOf',
+            'secret',
           ],
         },
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("witness-persona error", err);
-    res.status(500).json({ error: "witness-persona failed" });
+    console.error('witness-persona error', err);
+    res.status(500).json({ error: 'witness-persona failed' });
   }
 });
 
-app.post("/api/interrogation", async (req, res) => {
+app.post('/api/interrogation', async (req, res) => {
   try {
-    const {
-      messages,
-      persona,
-      objects,
-    } = req.body as {
-      messages: { role: "user" | "witness"; text: string }[];
+    const { messages, persona, objects } = req.body as {
+      messages: { role: 'user' | 'witness'; text: string }[];
       persona: {
         name: string;
         archetype: string;
@@ -245,18 +241,19 @@ app.post("/api/interrogation", async (req, res) => {
       objects: string[];
     };
 
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const archetypeIdentity = (
-      ARCHETYPE_IDENTITIES[persona.archetype] ?? ARCHETYPE_IDENTITIES["Nervous Wreck"]
+      ARCHETYPE_IDENTITIES[persona.archetype] ??
+      ARCHETYPE_IDENTITIES['Nervous Wreck']
     ).replace(/\[name\]/g, persona.name);
 
     const systemInstruction = `
       ${archetypeIdentity}
 
       You are age ${persona.age}, occupation ${persona.occupation}.
-      You are being interrogated about a crime in a room containing: [${objects.join(", ")}].
+      You are being interrogated about a crime in a room containing: [${objects.join(', ')}].
       Your secret: ${persona.secret}.
-      Your tells when lying: ${persona.tells.join(", ")}.
+      Your tells when lying: ${persona.tells.join(', ')}.
       Occasionally insert [CONTRADICTION] before a statement that contradicts something said earlier.
       Never admit guilt directly.
 
@@ -267,8 +264,8 @@ app.post("/api/interrogation", async (req, res) => {
 
     const response = await ai.models.generateContent({
       model,
-      contents: messages.map((m) => ({
-        role: m.role === "user" ? "user" : "model",
+      contents: messages.map(m => ({
+        role: m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.text }],
       })),
       config: {
@@ -278,17 +275,17 @@ app.post("/api/interrogation", async (req, res) => {
 
     res.json({ text: response.text || "I... I don't know what to say." });
   } catch (err) {
-    console.error("interrogation error", err);
-    res.status(500).json({ error: "interrogation failed" });
+    console.error('interrogation error', err);
+    res.status(500).json({ error: 'interrogation failed' });
   }
 });
 
-app.post("/api/contradiction", async (req, res) => {
+app.post('/api/contradiction', async (req, res) => {
   try {
     const { messages } = req.body as {
-      messages: { role: "user" | "witness"; text: string }[];
+      messages: { role: 'user' | 'witness'; text: string }[];
     };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const lastMessages = messages.slice(-6);
     const prompt = `
       Analyze the conversation history. Does the last witness statement contradict anything said earlier?
@@ -296,38 +293,36 @@ app.post("/api/contradiction", async (req, res) => {
       If true, provide the specific contradicting quote from the last message.
 
       History:
-      ${lastMessages
-        .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
-        .join("\n")}
+      ${lastMessages.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n')}
     `;
 
     const response = await ai.models.generateContent({
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             contradiction: { type: Type.BOOLEAN },
             quote: { type: Type.STRING },
           },
-          required: ["contradiction", "quote"],
+          required: ['contradiction', 'quote'],
         },
       },
     });
 
     res.json(JSON.parse(response.text || '{"contradiction":false,"quote":""}'));
   } catch (err) {
-    console.error("contradiction error", err);
-    res.status(500).json({ error: "contradiction failed" });
+    console.error('contradiction error', err);
+    res.status(500).json({ error: 'contradiction failed' });
   }
 });
 
-app.post("/api/safety", async (req, res) => {
+app.post('/api/safety', async (req, res) => {
   try {
     const { message } = req.body as { message: string };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       Does this message contain distress, threats, or inappropriate content? Return JSON: { "safe": boolean, "reason": string }
       Message: "${message}"
@@ -337,31 +332,31 @@ app.post("/api/safety", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             safe: { type: Type.BOOLEAN },
             reason: { type: Type.STRING },
           },
-          required: ["safe", "reason"],
+          required: ['safe', 'reason'],
         },
       },
     });
 
     res.json(JSON.parse(response.text || '{"safe":true,"reason":""}'));
   } catch (err) {
-    console.error("safety error", err);
-    res.status(500).json({ error: "safety failed" });
+    console.error('safety error', err);
+    res.status(500).json({ error: 'safety failed' });
   }
 });
 
-app.post("/api/engagement", async (req, res) => {
+app.post('/api/engagement', async (req, res) => {
   try {
     const { persona } = req.body as {
       persona: { name: string; archetype: string };
     };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       You are ${persona.name}, a ${persona.archetype}. The detective is being quiet or unhelpful.
       Introduce a surprising new plot element, a sudden memory, or a sharp question back to the detective to keep the interrogation moving.
@@ -379,21 +374,21 @@ app.post("/api/engagement", async (req, res) => {
         "Why aren't you saying anything? The silence is deafening.",
     });
   } catch (err) {
-    console.error("engagement error", err);
-    res.status(500).json({ error: "engagement failed" });
+    console.error('engagement error', err);
+    res.status(500).json({ error: 'engagement failed' });
   }
 });
 
-app.post("/api/accusation-options", async (req, res) => {
+app.post('/api/accusation-options', async (req, res) => {
   try {
     const { objects, persona } = req.body as {
       objects: string[];
       persona: { name: string; archetype: string };
     };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       Generate options for a murder mystery accusation.
-      Room objects: [${objects.join(", ")}]
+      Room objects: [${objects.join(', ')}]
       Witness: ${persona.name} (${persona.archetype})
 
       Return JSON:
@@ -408,7 +403,7 @@ app.post("/api/accusation-options", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -416,29 +411,29 @@ app.post("/api/accusation-options", async (req, res) => {
             methods: { type: Type.ARRAY, items: { type: Type.STRING } },
             motives: { type: Type.ARRAY, items: { type: Type.STRING } },
           },
-          required: ["suspects", "methods", "motives"],
+          required: ['suspects', 'methods', 'motives'],
         },
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("accusation-options error", err);
-    res.status(500).json({ error: "accusation-options failed" });
+    console.error('accusation-options error', err);
+    res.status(500).json({ error: 'accusation-options failed' });
   }
 });
 
-app.post("/api/evaluate", async (req, res) => {
+app.post('/api/evaluate', async (req, res) => {
   try {
     const { accusation, truth } = req.body as {
       accusation: { suspect: string; method: string; motive: string };
       truth: { witness: string; objects: string[]; guiltyOf: string };
     };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       The player accused ${accusation.suspect} using ${accusation.method} motivated by ${accusation.motive}.
       The true answer: ${truth.witness} is guilty, method derived from [${truth.objects.join(
-        ", "
+        ', '
       )}], motive was ${truth.guiltyOf}.
 
       Return JSON: { "correct": boolean, "verdict": string, "explanation": string }
@@ -449,7 +444,7 @@ app.post("/api/evaluate", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -457,28 +452,28 @@ app.post("/api/evaluate", async (req, res) => {
             verdict: { type: Type.STRING },
             explanation: { type: Type.STRING },
           },
-          required: ["correct", "verdict", "explanation"],
+          required: ['correct', 'verdict', 'explanation'],
         },
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("evaluate error", err);
-    res.status(500).json({ error: "evaluate failed" });
+    console.error('evaluate error', err);
+    res.status(500).json({ error: 'evaluate failed' });
   }
 });
 
-app.post("/api/casefile-timeline", async (req, res) => {
+app.post('/api/casefile-timeline', async (req, res) => {
   try {
     const { persona, objects } = req.body as {
       persona: { name: string; archetype: string; guiltyOf: string };
       objects: string[];
     };
-    const model = "gemini-3-flash-preview";
+    const model = 'gemini-3-flash-preview';
     const prompt = `
       Generate 4 steps of what actually happened during the crime based on the witness persona (${persona.name}, ${persona.archetype}, guilty of ${persona.guiltyOf}) and the scene objects ([${objects.join(
-        ", "
+        ', '
       )}]).
       Return a JSON array of 4 strings.
     `;
@@ -487,7 +482,7 @@ app.post("/api/casefile-timeline", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
         responseSchema: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
@@ -495,14 +490,13 @@ app.post("/api/casefile-timeline", async (req, res) => {
       },
     });
 
-    res.json(JSON.parse(response.text || "[]"));
+    res.json(JSON.parse(response.text || '[]'));
   } catch (err) {
-    console.error("casefile-timeline error", err);
-    res.status(500).json({ error: "casefile-timeline failed" });
+    console.error('casefile-timeline error', err);
+    res.status(500).json({ error: 'casefile-timeline failed' });
   }
 });
 
 app.listen(port, () => {
   console.log(`Witness backend listening on port ${port}`);
 });
-

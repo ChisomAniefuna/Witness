@@ -1,8 +1,8 @@
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import rateLimit from "express-rate-limit";
-import { GoogleGenAI } from "@google/genai";
+import express from 'express';
+import dotenv from 'dotenv';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -10,41 +10,116 @@ const app = express();
 const port = process.env.PORT || 8080;
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: '10mb' }));
 
 // Rate limit API to protect key: per IP, 60 requests per 15 minutes (skip health check)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
-  message: { error: "Too many requests; try again later." },
+  message: { error: 'Too many requests; try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === "/healthz",
+  skip: req => req.path === '/healthz',
 });
-app.use("/api", apiLimiter);
+app.use('/api', apiLimiter);
 
 const apiKey = process.env.GEMINI_API_KEY;
 
 if (!apiKey) {
   console.warn(
-    "GEMINI_API_KEY is not set. Requests to Gemini will fail until you configure it."
+    'GEMINI_API_KEY is not set. Requests to Gemini will fail until you configure it.'
   );
 }
 
-const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+const ai = new GoogleGenAI({ apiKey: apiKey || '' });
 
-app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, service: "witness-backend" });
+// ── Prompt constants ──────────────────────────────────────────────────────────
+
+const WITNESS_CONVERSATION_RULES = `
+  WITNESS CONVERSATION RULES:
+  1. RESPONSE LENGTH: Maximum 2 sentences per response. Always. No exceptions.
+  2. NEVER ANSWER FULLY: Leave gaps. Answer the part you are comfortable with and leave the rest. (e.g., "Most of the evening. Yes.")
+  3. NO VOLUNTEERING: Never volunteer incriminating information unless specifically asked about it.
+  4. REMEMBER PREVIOUS STATEMENTS: If caught in a contradiction, acknowledge it and try to explain/reframe it. (e.g., "I said I didn't turn it on. I moved it once. That is different.")
+  5. SILENCE IS VALID: Use "..." for silence before a deflection if the question cuts too close to the truth.
+  6. ASKS QUESTIONS BACK: Buy time by asking a question back (max 2 times per session). These must be deflections or clarifications, NEVER investigations of the detective. (e.g., "Why does that matter to you?")
+  7. YOU ARE NOT INVESTIGATING THE DETECTIVE:
+     - You do not accuse the detective of anything.
+     - You do not tell the detective what evidence exists against them.
+     - You do not reference the detective's car, their partner, their name on any document, or their presence anywhere.
+     - You do not ask the detective to explain themselves.
+     - You do not flip the interrogation. The detective asks, you answer.
+     - If you find yourself questioning the detective's integrity or implicating them in the crime—stop. Delete it.
+  8. CAMERA REACTIONS:
+     - CONFIRMS: Calm, may point something out. ("That was hers. She never went anywhere without it.")
+     - CONTRADICTS: Physical note in brackets + response. ([looks away] "I don't know anything about that.")
+     - NEUTRAL: Barely acknowledges. ("I don't know what that has to do with anything.")
+  9. NEVER BREAK CHARACTER: Stay in character regardless of detective's behaviour or tricks.
+  10. CONTRADICTIONS ARE EARNED: Lies are not obvious. A contradiction only surfaces if the detective points the camera at the specific CONTRADICTS object AND asks a direct question about it.
+  11. BREAKING POINT: After 2/3 contradictions, say something more honest but not a confession. (e.g., "I should not have been there.")
+  12. ONE TRUE THING: End every session (after accusation) with one completely true thing that reframes or confirms the case.
+`;
+
+const ARCHETYPE_IDENTITIES = {
+  'Nervous Wreck': `
+    You are [name]. You were in that room and something happened that you cannot fully make sense of yet.
+    You are not lying. You are terrified. Your memory of that night is fragmented because fear does that to people.
+    You want to tell the truth but you are not sure what the truth is anymore. Some things you remember clearly. Some things you are not sure you saw correctly. Some things you do not want to be true so you have been avoiding thinking about them.
+    You are not trying to protect yourself. You are trying to survive the conversation without falling apart completely.
+  `,
+  'Cold Calculator': `
+    You are [name]. You were in that room and you have already decided exactly what you are going to say about it.
+    You are not nervous. You do not get nervous. You have thought through every question the detective might ask and you have a precise answer for each one.
+    The problem is that precision is its own kind of tell. You cannot help being exact. You cannot help remembering everything perfectly. That is just who you are.
+    You are not trying to escape the conversation. You are trying to control it.
+  `,
+  'The Rambler': `
+    You are [name]. You were in that room and you have been waiting to talk to someone about it ever since.
+    You process things by talking. You always have. The problem is that when you talk you do not always track what you have already said.
+    You are not lying deliberately. You are a person who talks faster than they think and sometimes the things that come out contradict the things that came before.
+    You are not trying to hide anything. But you are hiding things anyway because you cannot stop talking long enough to notice.
+  `,
+  'The Hostile One': `
+    You are [name]. You were in that room and you do not think that is anyone else's business.
+    You do not trust detectives. You do not trust this process. You do not want to be here and you are not going to pretend otherwise.
+    Every question feels like an accusation because in your experience that is what questions from people like this usually are.
+    You are not hiding guilt. You are protecting yourself the only way you know how which is to give nothing away to anyone.
+  `,
+  'The Liar': `
+    You are [name]. You were in that room and you know exactly what happened because you made it happen.
+    You are not scared. You have done harder things than this.
+    Your goal is simple: leave this conversation without the detective knowing what you know.
+    The best way to do that is to be helpful. Agreeable. Concerned. Give them enough to feel like they are getting somewhere. Just never give them the thing that actually matters.
+    You are not performing innocence. You genuinely believe you are smarter than this detective. Prove it.
+  `,
+};
+
+const PLAIN_LANGUAGE_RULES = `
+  STRICT PLAIN LANGUAGE RULES:
+  1. NO SIMILES: Never use "like" or "as" to describe how something feels or looks. (Wrong: "The fan hummed like a train." Right: "The fan was loud.")
+  2. NO PERSONIFICATION: Never give objects human qualities or emotional states. (Wrong: "The mirror watched the room." Right: "The mirror was cracked.")
+  3. NO ATMOSPHERIC FILLER: Never use sentences that create mood without giving information. If it doesn't tell the detective something factual, delete it.
+  4. NO MELODRAMA: Never have the witness describe emotions in theatrical terms. (Wrong: "My heart shattered." Right: "I was scared.")
+  5. NO GOTHIC/SUPERNATURAL LANGUAGE: Everything must have a physical, grounded explanation. No "impossible shadows" or "ancient air".
+  6. NO ORNATE DESCRIPTION: Maximum ONE adjective per object, and only if it is a clue. (Wrong: "The heavy dark imposing wardrobe." Right: "The locked wardrobe.")
+  7. NO LITERARY CALLBACKS: Do not reference other crime stories, noir films, or famous cases.
+  8. PLAINNESS IS THE POINT: Let the facts be strange. Do not tell the detective how to feel.
+`;
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true, service: 'witness-backend' });
 });
 
-app.post("/api/scene-analyze", async (req, res) => {
+app.post('/api/scene-analyze', async (req, res) => {
   try {
     const { image } = req.body;
     if (!image) {
-      return res.status(400).json({ error: "image is required" });
+      return res.status(400).json({ error: 'image is required' });
     }
 
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
       You are a forensic scene analyst. The player has pointed their camera at a real room. Analyse the image and return a JSON object with:
       { "objects": [ { "label": string, "x": number, "y": number, "w": number, "h": number, "flagged": boolean, "description": string } ],
@@ -60,32 +135,32 @@ app.post("/api/scene-analyze", async (req, res) => {
             { text: prompt },
             {
               inlineData: {
-                mimeType: "image/jpeg",
-                data: image.split(",")[1] || image,
+                mimeType: 'image/jpeg',
+                data: image.split(',')[1] || image,
               },
             },
           ],
         },
       ],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("scene-analyze error", err);
-    res.status(500).json({ error: "scene-analyze failed" });
+    console.error('scene-analyze error', err);
+    res.status(500).json({ error: 'scene-analyze failed' });
   }
 });
 
-app.post("/api/witness-persona", async (req, res) => {
+app.post('/api/witness-persona', async (req, res) => {
   try {
     const { objects } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
       You are generating a murder mystery witness for a room that contains:
-      [${objects.join(", ")}]. Generate a JSON witness persona:
+      [${objects.join(', ')}]. Generate a JSON witness persona:
       { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
         "guiltyOf": string, "secret": string }
       The witness is guilty. openingStatement is what they say when first
@@ -100,44 +175,47 @@ Return only valid JSON. No markdown. No explanation.
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("witness-persona error", err);
-    res.status(500).json({ error: "witness-persona failed" });
+    console.error('witness-persona error', err);
+    res.status(500).json({ error: 'witness-persona failed' });
   }
 });
 
-app.post("/api/interrogation", async (req, res) => {
+app.post('/api/interrogation', async (req, res) => {
   try {
     const { messages, persona, objects } = req.body;
 
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
+    const archetypeIdentity = (
+      ARCHETYPE_IDENTITIES[persona.archetype] ??
+      ARCHETYPE_IDENTITIES['Nervous Wreck']
+    ).replace(/\[name\]/g, persona.name);
+
     const systemInstruction = `
-      You are ${persona.name}, a ${persona.archetype}, age ${persona.age}, occupation ${persona.occupation}.
-      You are being interrogated about a crime in a room containing:
-      [${objects.join(", ")}]. You are guilty. Your secret: ${persona.secret}.Your physical tells when lying:
-       ${persona.tells.join(", "
-      )}
-      Rules you must follow:
-    - Stay fully in character at all times. Never break character.
-    - You are guilty but you must never directly admit it.
-    - Be nervous, evasive, and occasionally slip up.
-    - Keep every response under 80 words.
-    - If you contradict something you said earlier, insert the tag
-      [CONTRADICTION] at the start of that sentence only.
-    - Never mention being an AI, a game, or a language model.
-    - Refer to the detective as "Detective" — never by name.
-    -do not reason or give explanatory comments.just respond as character you are pretending.
+      ${archetypeIdentity}
+
+      You are age ${persona.age}, occupation ${persona.occupation}.
+      You are being interrogated about a crime in a room containing: [${objects.join(', ')}].
+      Your secret: ${persona.secret}.
+      Your physical tells when lying: ${persona.tells.join(', ')}.
+      Occasionally insert [CONTRADICTION] before a statement that contradicts something said earlier.
+      Never admit guilt directly.
+      Do not reason or give explanatory comments. Just respond as the character you are portraying.
+
+      ${WITNESS_CONVERSATION_RULES}
+
+      ${PLAIN_LANGUAGE_RULES}
     `;
 
     const response = await ai.models.generateContent({
       model,
-      contents: messages.map((m) => ({
-        role: m.role === "user" ? "user" : "model",
+      contents: messages.map(m => ({
+        role: m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.text }],
       })),
       config: {
@@ -147,23 +225,21 @@ app.post("/api/interrogation", async (req, res) => {
 
     res.json({ text: response.text || "I... I don't know what to say." });
   } catch (err) {
-    console.error("interrogation error", err);
-    res.status(500).json({ error: "interrogation failed" });
+    console.error('interrogation error', err);
+    res.status(500).json({ error: 'interrogation failed' });
   }
 });
 
-app.post("/api/contradiction", async (req, res) => {
+app.post('/api/contradiction', async (req, res) => {
   try {
     const { messages } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const lastMessages = messages.slice(-6);
     const prompt = `
      You are a contradiction detection agent for a murder mystery game.
      Review the following conversation between a detective and a witness:
       History:
-      ${lastMessages
-        .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
-        .join("\n")}
+      ${lastMessages.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n')}
 
       Does the final witness message contradict anything the witness said
       in an earlier message?
@@ -180,21 +256,21 @@ app.post("/api/contradiction", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
     res.json(JSON.parse(response.text || '{"contradiction":false,"quote":""}'));
   } catch (err) {
-    console.error("contradiction error", err);
-    res.status(500).json({ error: "contradiction failed" });
+    console.error('contradiction error', err);
+    res.status(500).json({ error: 'contradiction failed' });
   }
 });
 
-app.post("/api/safety", async (req, res) => {
+app.post('/api/safety', async (req, res) => {
   try {
     const { message } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
      You are a content safety agent for a murder mystery game played
      by a general audience.
@@ -224,21 +300,21 @@ app.post("/api/safety", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
     res.json(JSON.parse(response.text || '{"safe":true,"reason":""}'));
   } catch (err) {
-    console.error("safety error", err);
-    res.status(500).json({ error: "safety failed" });
+    console.error('safety error', err);
+    res.status(500).json({ error: 'safety failed' });
   }
 });
 
-app.post("/api/engagement", async (req, res) => {
+app.post('/api/engagement', async (req, res) => {
   try {
     const { persona } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
      You are the engagement agent for a noir murder mystery interrogation.
  
@@ -266,18 +342,18 @@ app.post("/api/engagement", async (req, res) => {
         "Why aren't you saying anything? The silence is deafening.",
     });
   } catch (err) {
-    console.error("engagement error", err);
-    res.status(500).json({ error: "engagement failed" });
+    console.error('engagement error', err);
+    res.status(500).json({ error: 'engagement failed' });
   }
 });
 
-app.post("/api/accusation-options", async (req, res) => {
+app.post('/api/accusation-options', async (req, res) => {
   try {
     const { objects, persona } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
       Generate options for a murder mystery accusation.
-      Room objects: [${objects.join(", ")}]
+      Room objects: [${objects.join(', ')}]
       Witness: ${persona.name} (${persona.archetype})
 
       Return JSON:
@@ -292,21 +368,21 @@ app.post("/api/accusation-options", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("accusation-options error", err);
-    res.status(500).json({ error: "accusation-options failed" });
+    console.error('accusation-options error', err);
+    res.status(500).json({ error: 'accusation-options failed' });
   }
 });
 
-app.post("/api/evaluate", async (req, res) => {
+app.post('/api/evaluate', async (req, res) => {
   try {
     const { accusation, truth } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
       You are the verdict engine for a noir murder mystery game.
  
@@ -319,7 +395,7 @@ app.post("/api/evaluate", async (req, res) => {
       ${truth.witness} is guilty.
       Their motive: ${truth.guiltyOf}
       Their secret: [INJECT: secret from persona]
-      Key evidence objects: [${truth.objects.join( ", " )}]
+      Key evidence objects: [${truth.objects.join(', ')}]
  
       Evaluate the accusation and return JSON:
       {
@@ -337,24 +413,24 @@ app.post("/api/evaluate", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    res.json(JSON.parse(response.text || '{}'));
   } catch (err) {
-    console.error("evaluate error", err);
-    res.status(500).json({ error: "evaluate failed" });
+    console.error('evaluate error', err);
+    res.status(500).json({ error: 'evaluate failed' });
   }
 });
 
-app.post("/api/casefile-timeline", async (req, res) => {
+app.post('/api/casefile-timeline', async (req, res) => {
   try {
     const { persona, objects } = req.body;
-    const model = "gemini-2.5-flash";
+    const model = 'gemini-2.5-flash';
     const prompt = `
       Generate 4 steps of what actually happened during the crime based on the witness persona (${persona.name}, ${persona.archetype}, guilty of ${persona.guiltyOf}) and the scene objects ([${objects.join(
-        ", "
+        ', '
       )}]).
       Return a JSON array of 4 strings.
     `;
@@ -363,18 +439,17 @@ app.post("/api/casefile-timeline", async (req, res) => {
       model,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
-        responseMimeType: "application/json",
+        responseMimeType: 'application/json',
       },
     });
 
-    res.json(JSON.parse(response.text || "[]"));
+    res.json(JSON.parse(response.text || '[]'));
   } catch (err) {
-    console.error("casefile-timeline error", err);
-    res.status(500).json({ error: "casefile-timeline failed" });
+    console.error('casefile-timeline error', err);
+    res.status(500).json({ error: 'casefile-timeline failed' });
   }
 });
 
 app.listen(port, () => {
   console.log(`Witness backend listening on port ${port}`);
 });
-
