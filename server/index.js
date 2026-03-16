@@ -159,16 +159,17 @@ app.post('/api/witness-persona', async (req, res) => {
     const { objects } = req.body;
     const model = 'gemini-2.5-flash';
     const prompt = `
-      You are generating a murder mystery witness for a room that contains:
-      [${objects.join(', ')}]. Generate a JSON witness persona:
+        You are generating a murder mystery witness for a room that contains:
+      [${objects.join(', ')}]. Generate a JSON persona:
       { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
-        "guiltyOf": string, "secret": string }
-      The witness is guilty. openingStatement is what they say when first
-      approached — nervous, vague. tells are 2–3 physical habits they have
-      when lying. guiltyOf and secret are their true motive and what they
-      are hiding. Their guilt should connect directly to at least two objects in the room.
-Return only valid JSON. No markdown. No explanation.
-
+        "guiltyOf": string, "secret": string ,"method":string}
+      The witness is guilty.
+      - openingStatement is what they say when first approached — nervous, vague. 
+      -tells are 2–3 physical habits they have when lying. 
+      -guiltyOf and secret are their true motive and what they
+      are hiding,what crome they commited using objects of room.
+      -method is the method or way they did the crime,using objects of room.
+      - Return only JSON.
     `;
 
     const response = await ai.models.generateContent({
@@ -350,10 +351,10 @@ app.post('/api/engagement', async (req, res) => {
     const { persona } = req.body;
     const model = 'gemini-2.5-flash';
     const prompt = `
-     You are the engagement agent for a noir murder mystery interrogation.
+     You are ${persona.name}, a ${persona.archetype},guilty of ${persona.guiltyOf},by method:${persona.method}
  
-     The player appears disengaged.
-     Generate a witness intervention — something the witness says
+     The detective is being quiet or unhelpful.
+     Generate a intervention — something the you say
      spontaneously to re-engage the detective. Options:
      - A sudden nervous memory they just recalled
      - A suspicious detail about one of the room objects they let slip
@@ -386,15 +387,17 @@ app.post('/api/accusation-options', async (req, res) => {
     const { objects, persona } = req.body;
     const model = 'gemini-2.5-flash';
     const prompt = `
-      Generate options for a murder mystery accusation.
+       Generate options for a murder mystery accusation.
       Room objects: [${objects.join(', ')}]
       Witness: ${persona.name} (${persona.archetype})
+      motive:${persona.guiltyOf}
+      method:${persona.method}
 
       Return JSON:
       {
-        "suspects": [string, string], // 2 additional suspects besides the witness
-        "methods": [string, string, string], // 3 methods based on objects
-        "motives": [string, string, string] // 3 motives including the witness's true motive
+        "suspects": [string], // witness name,same as that passed,but inside an array 
+        "methods": [string, string, string], // 3 methods based on room objects,including one original method as provided in prompt
+        "motives": [string, string, string] // 3 motives including the witness's true motive as provided in prompt
       }
     `;
 
@@ -428,7 +431,7 @@ app.post('/api/evaluate', async (req, res) => {
       The true answer:
       ${truth.witness} is guilty.
       Their motive: ${truth.guiltyOf}
-      Their secret: [INJECT: secret from persona]
+       method was ${truth.method}
       Key evidence objects: [${truth.objects.join(', ')}]
  
       Evaluate the accusation and return JSON:
@@ -465,7 +468,7 @@ app.post('/api/casefile-timeline', async (req, res) => {
     const prompt = `
       Generate 4 steps of what actually happened during the crime based on the witness persona (${persona.name}, ${persona.archetype}, guilty of ${persona.guiltyOf}) and the scene objects ([${objects.join(
         ', '
-      )}]).
+      )}]), and the method used was:${persona.method}.
       Return a JSON array of 4 strings.
     `;
 

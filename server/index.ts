@@ -11,7 +11,7 @@ const port = process.env.PORT || 8080;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-const apiKey = process.env.GEMINI_API_KEY;
+const apiKey = 'AIzaSyByJf7XYYVfOuwFxNc-47r6MgcpxeWOUyY';
 
 if (!apiKey) {
   console.warn(
@@ -181,11 +181,14 @@ app.post('/api/witness-persona', async (req, res) => {
       You are generating a murder mystery witness for a room that contains:
       [${objects.join(', ')}]. Generate a JSON persona:
       { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
-        "guiltyOf": string, "secret": string }
-      The witness is guilty. openingStatement is what they say when first
-      approached — nervous, vague. tells are 2–3 physical habits they have
-      when lying. guiltyOf and secret are their true motive and what they
-      are hiding. Return only JSON.
+        "guiltyOf": string, "secret": string ,"method":string}
+      The witness is guilty.
+      - openingStatement is what they say when first approached — nervous, vague. 
+      -tells are 2–3 physical habits they have when lying. 
+      -guiltyOf and secret are their true motive and what they
+      are hiding.
+      -method is the method or way they did the crime,using objects of room.
+      - Return only JSON.
     `;
 
     const response = await ai.models.generateContent({
@@ -418,19 +421,21 @@ app.post('/api/accusation-options', async (req, res) => {
   try {
     const { objects, persona } = req.body as {
       objects: string[];
-      persona: { name: string; archetype: string };
+      persona: { name: string; archetype: string; guiltyOf:string; method:string };
     };
     const model = 'gemini-3-flash-preview';
     const prompt = `
       Generate options for a murder mystery accusation.
       Room objects: [${objects.join(', ')}]
       Witness: ${persona.name} (${persona.archetype})
+      motive:${persona.guiltyOf}
+      method:${persona.method}
 
       Return JSON:
       {
-        "suspects": [string, string], // 2 additional suspects besides the witness
-        "methods": [string, string, string], // 3 methods based on objects
-        "motives": [string, string, string] // 3 motives including the witness's true motive
+        "suspect": [string], // witness name,same as that passed 
+        "methods": [string, string, string], // 3 methods based on room objects,including one original method as provided in prompt
+        "motives": [string, string, string] // 3 motives including the witness's true motive as provided in prompt
       }
     `;
 
@@ -462,14 +467,12 @@ app.post('/api/evaluate', async (req, res) => {
   try {
     const { accusation, truth } = req.body as {
       accusation: { suspect: string; method: string; motive: string };
-      truth: { witness: string; objects: string[]; guiltyOf: string };
+      truth: { witness: string; objects: string[]; guiltyOf: string;method:string };
     };
     const model = 'gemini-3-flash-preview';
     const prompt = `
       The player accused ${accusation.suspect} using ${accusation.method} motivated by ${accusation.motive}.
-      The true answer: ${truth.witness} is guilty, method derived from [${truth.objects.join(
-        ', '
-      )}], motive was ${truth.guiltyOf}.
+      The true answer: ${truth.witness} is guilty, method was ${truth.method}, motive was ${truth.guiltyOf}.
 
       Return JSON: { "correct": boolean, "verdict": string, "explanation": string }
       where verdict is a dramatic one-liner and explanation is a 2-sentence case summary.

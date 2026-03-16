@@ -186,6 +186,7 @@ async def websocket_live(websocket: WebSocket):
         response_modalities=["AUDIO"],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
+        session_resumption=types.SessionResumptionConfig(),
     )
     live_request_queue = LiveRequestQueue()
 

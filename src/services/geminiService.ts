@@ -22,6 +22,7 @@ export interface WitnessPersona {
   openingStatement: string;
   guiltyOf: string;
   secret: string;
+  method:String;
 }
 
 export async function analyzeScene(base64Image: string): Promise<SceneAnalysis> {
@@ -116,7 +117,7 @@ export async function getAccusationOptions(objects: string[], persona: WitnessPe
 
 export async function evaluateAccusation(
   accusation: { suspect: string, method: string, motive: string },
-  truth: { witness: string, objects: string[], guiltyOf: string }
+  truth: { witness: string, objects: string[], guiltyOf: string ,method:string}
 ): Promise<{ correct: boolean, verdict: string, explanation: string }> {
   const res = await fetch(`${API_BASE}/api/evaluate`, {
     method: "POST",

@@ -991,6 +991,7 @@ export default function App() {
           '"I was here when it happened. I heard everything. I saw him leave. At least… I think that\'s what I saw."',
         guiltyOf: 'Accidental Manslaughter',
         secret: 'He was sleeping on the job when the crime occurred.',
+        method:'killed the person with knife he brought,then threw him from the balcony to make it seem like an accident'
       };
       queueOrCommitWitnessPersona(fallback);
     } finally {
@@ -1139,6 +1140,7 @@ export default function App() {
           witness: persona.name,
           objects: detections.map(d => d.label),
           guiltyOf: persona.guiltyOf,
+          method:persona.method
         }
       );
       setVerdict(res);
