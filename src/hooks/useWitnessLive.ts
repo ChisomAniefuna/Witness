@@ -202,8 +202,10 @@ function decodeAudioData(data: string | number[]): ArrayBuffer | null {
   return null;
 }
 
-// Buffer before playing: smaller = lower latency; we flush on turn_complete so the tail plays.
-const MIN_BUFFER_MS = 30;
+// Buffer before playing: keep enough audio queued to smooth network jitter without adding much lag.
+const MIN_BUFFER_MS = 60;
+const PLAYBACK_LOOKAHEAD_MS = 20;
+const CHUNK_CROSSFADE_MS = 10;
 
 /** Create a simple queue-based PCM player for witness audio (e.g. 24 kHz from Gemini). */
 export function createLiveAudioPlayer(): {
@@ -221,10 +223,10 @@ export function createLiveAudioPlayer(): {
   /** Re-enable playback for the next witness turn. Call on turn_complete. */
   release: () => void;
 } {
-  let queue: { buffer: ArrayBuffer; sampleRate: number }[] = [];
-  let playing = false;
   let ctx: AudioContext | null = null;
-  let currentSource: AudioBufferSourceNode | null = null;
+  let masterGain: GainNode | null = null;
+  let scheduledUntil = 0;
+  const activeSources = new Set<AudioBufferSourceNode>();
   // When suppressed, playChunk silently drops new chunks until release() is called.
   let suppressed = false;
   const accumulator: {
@@ -236,6 +238,67 @@ export function createLiveAudioPlayer(): {
     totalBytes: 0,
     sampleRate: 24000,
   };
+
+  function ensureContext(): AudioContext {
+    if (!ctx) {
+      ctx = new AudioContext({ latencyHint: 'interactive' });
+      masterGain = ctx.createGain();
+      masterGain.gain.setValueAtTime(1, ctx.currentTime);
+      masterGain.connect(ctx.destination);
+    }
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+
+  function scheduleBuffer(buffer: ArrayBuffer, sampleRate: number): void {
+    if (!buffer || buffer.byteLength === 0) return;
+    const audioContext = ensureContext();
+    const int16 = new Int16Array(buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i]! / (int16[i]! < 0 ? 0x8000 : 0x7fff);
+    }
+
+    const audioBuffer = audioContext.createBuffer(
+      1,
+      float32.length,
+      sampleRate
+    );
+    audioBuffer.getChannelData(0).set(float32);
+
+    const source = audioContext.createBufferSource();
+    const gainNode = audioContext.createGain();
+    const lookaheadSeconds = PLAYBACK_LOOKAHEAD_MS / 1000;
+    const duration = audioBuffer.duration;
+    const crossfadeSeconds = Math.min(CHUNK_CROSSFADE_MS / 1000, duration / 3);
+    const overlapStart =
+      scheduledUntil > 0 ? Math.max(0, scheduledUntil - crossfadeSeconds) : 0;
+    const startAt = Math.max(
+      audioContext.currentTime + lookaheadSeconds,
+      overlapStart
+    );
+    const endAt = startAt + duration;
+
+    source.buffer = audioBuffer;
+    source.connect(gainNode);
+    gainNode.connect(masterGain!);
+
+    gainNode.gain.setValueAtTime(0.0001, startAt);
+    gainNode.gain.linearRampToValueAtTime(1, startAt + crossfadeSeconds);
+    gainNode.gain.setValueAtTime(
+      1,
+      Math.max(startAt + crossfadeSeconds, endAt - crossfadeSeconds)
+    );
+    gainNode.gain.linearRampToValueAtTime(0.0001, endAt);
+
+    source.onended = () => {
+      activeSources.delete(source);
+    };
+
+    activeSources.add(source);
+    source.start(startAt);
+    scheduledUntil = endAt;
+  }
 
   function flushAccumulator(): void {
     if (accumulator.buffers.length === 0) return;
@@ -250,50 +313,20 @@ export function createLiveAudioPlayer(): {
     }
     accumulator.buffers = [];
     accumulator.totalBytes = 0;
-    queue.push({ buffer: merged, sampleRate: rate });
-    if (!playing) playNext();
-  }
-
-  function playNext(): void {
-    if (queue.length === 0) {
-      playing = false;
-      currentSource = null;
-      return;
-    }
-    const { buffer, sampleRate } = queue.shift()!;
-    if (!buffer || buffer.byteLength === 0) {
-      playNext();
-      return;
-    }
-    if (!ctx)
-      ctx = new AudioContext({ sampleRate, latencyHint: 'interactive' });
-    // Resume if suspended (browser autoplay policy)
-    if (ctx.state === 'suspended') ctx.resume();
-    const int16 = new Int16Array(buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++)
-      float32[i] = int16[i]! / (int16[i]! < 0 ? 0x8000 : 0x7fff);
-    const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
-    audioBuffer.getChannelData(0).set(float32);
-    const source = ctx.createBufferSource();
-    currentSource = source;
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    source.onended = () => playNext();
-    source.start(0);
-    playing = true;
+    scheduleBuffer(merged, rate);
   }
 
   function stopPlayback(): void {
-    if (currentSource)
+    for (const source of activeSources) {
       try {
-        currentSource.stop();
+        source.stop();
       } catch (_) {}
-    currentSource = null;
-    queue.length = 0;
+    }
+    activeSources.clear();
     accumulator.buffers = [];
     accumulator.totalBytes = 0;
-    playing = false;
+    scheduledUntil = 0;
+    masterGain = null;
     if (ctx) {
       try {
         // Close the AudioContext to release audio resources and allow GC.
