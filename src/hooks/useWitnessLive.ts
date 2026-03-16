@@ -20,6 +20,9 @@ const BARGE_IN_REQUIRED_FRAMES = 3;
 /** Local barge-in: stop witness audio the moment the user speaks, before server acks.
  *  The echo-fade guard (ECHO_FADE_MS) prevents speaker echo from triggering this falsely. */
 const ENABLE_LOCAL_BARGE_IN = true;
+/** When Bluetooth audio is detected, avoid streaming mic while witness is speaking. */
+const BT_LABEL_HINTS = ['bluetooth', 'hands-free', 'ag audio', 'hfp', 'hsp'];
+const ECHO_GUARD_PRE_ROLL_CHUNKS = 4;
 
 /** Downsample Float32Array (e.g. 48k) to 16k and convert to Int16 PCM. */
 function toPcm16k(
@@ -97,6 +100,12 @@ function isSameTranscriptUtterance(
   }
 
   return suffixPrefixOverlap >= overlapThreshold;
+}
+
+function labelLooksBluetooth(label?: string): boolean {
+  if (!label) return false;
+  const lower = label.toLowerCase();
+  return BT_LABEL_HINTS.some(hint => lower.includes(hint));
 }
 
 function chooseFinalTranscript(previous: string, incoming: string): string {
@@ -444,6 +453,8 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
   const lastLocalInterruptMsRef = useRef(0);
   const noiseFloorRef = useRef(0.01);
   const localBargeActiveFramesRef = useRef(0);
+  const echoGuardEnabledRef = useRef(false);
+  const preRollChunksRef = useRef<ArrayBuffer[]>([]);
   const hasOutputTranscriptionInTurnRef = useRef(false);
   const userTranscriptClosedRef = useRef(false);
   const streamedTextRef = useRef<{ user: string; witness: string }>({
@@ -539,6 +550,8 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
     noiseFloorRef.current = 0.01;
     lastLocalInterruptMsRef.current = 0;
     localBargeActiveFramesRef.current = 0;
+    echoGuardEnabledRef.current = false;
+    preRollChunksRef.current = [];
     hasOutputTranscriptionInTurnRef.current = false;
     userTranscriptClosedRef.current = false;
     echoFadeUntilRef.current = 0;
@@ -550,17 +563,59 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
 
   const startMicCapture = useCallback(
     (sendAudioBinary: (pcmBuffer: ArrayBuffer) => void) => {
-      navigator.mediaDevices
-        .getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: SAMPLE_RATE_TARGET,
-          },
-        })
-        .then(stream => {
-          mediaStreamRef.current = stream;
+      const baseConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: SAMPLE_RATE_TARGET,
+      };
+      const buildConstraints = (deviceId?: string) => ({
+        audio: deviceId
+          ? { ...baseConstraints, deviceId: { exact: deviceId } }
+          : baseConstraints,
+      });
+
+      const pickNonBluetoothInput = async (
+        stream: MediaStream
+      ): Promise<MediaStream> => {
+        const track = stream.getAudioTracks()[0];
+        const label = track?.label;
+        if (!labelLooksBluetooth(label)) return stream;
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const currentId = track?.getSettings().deviceId;
+          const alt = devices.find(
+            d =>
+              d.kind === 'audioinput' &&
+              d.deviceId &&
+              d.deviceId !== currentId &&
+              !labelLooksBluetooth(d.label)
+          );
+          if (!alt) return stream;
+          stream.getTracks().forEach(t => t.stop());
+          return navigator.mediaDevices.getUserMedia(
+            buildConstraints(alt.deviceId)
+          );
+        } catch {
+          return stream;
+        }
+      };
+
+      const setupStream = (stream: MediaStream) => {
+        mediaStreamRef.current = stream;
+        const trackLabel = stream.getAudioTracks()[0]?.label;
+        if (labelLooksBluetooth(trackLabel)) {
+          echoGuardEnabledRef.current = true;
+        }
+        navigator.mediaDevices
+          .enumerateDevices()
+          .then(devices => {
+            const hasBtOutput = devices.some(
+              d => d.kind === 'audiooutput' && labelLooksBluetooth(d.label)
+            );
+            if (hasBtOutput) echoGuardEnabledRef.current = true;
+          })
+          .catch(() => {});
           // Use the browser's native sample rate; toPcm16k downsamples to 16kHz.
           const ctx = new AudioContext({ latencyHint: 'interactive' });
           audioContextRef.current = ctx;
@@ -637,12 +692,37 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
                 buffer.splice(0, srcSamplesPerChunk)
               );
               const pcm = toPcm16k(chunk, sr);
-              sendAudioBinary(pcm);
+              const echoGuardActive =
+                echoGuardEnabledRef.current &&
+                statusRef.current === 'witness_speaking';
+              if (echoGuardActive) {
+                preRollChunksRef.current.push(pcm);
+                if (preRollChunksRef.current.length > ECHO_GUARD_PRE_ROLL_CHUNKS) {
+                  preRollChunksRef.current.shift();
+                }
+              } else {
+                if (preRollChunksRef.current.length) {
+                  for (const queued of preRollChunksRef.current) {
+                    sendAudioBinary(queued);
+                  }
+                  preRollChunksRef.current = [];
+                }
+                sendAudioBinary(pcm);
+              }
             }
           };
           source.connect(processor);
-          processor.connect(ctx.destination);
-        })
+          // Prevent mic monitor/loopback: route processor to a silent gain node.
+          const silence = ctx.createGain();
+          silence.gain.value = 0;
+          processor.connect(silence);
+          silence.connect(ctx.destination);
+        };
+
+      navigator.mediaDevices
+        .getUserMedia(buildConstraints())
+        .then(pickNonBluetoothInput)
+        .then(setupStream)
         .catch(err => {
           console.error('useWitnessLive: mic error', err);
           setError(
