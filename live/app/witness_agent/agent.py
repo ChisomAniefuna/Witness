@@ -3,12 +3,16 @@ Witness agent for ADK Live: noir witness persona, interrogated about a room.
 Instructions are built at runtime from init message (persona + objectLabels).
 No tools for MVP.
 """
+import os
+
 from google.adk.agents import Agent
 
 # Model: Gemini Live native audio for Bidi streaming.
 # If you run into model availability issues, check the Live API docs and
 # update this ID to a currently supported native-audio model.
-WITNESS_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+WITNESS_LIVE_MODEL = os.getenv(
+    "WITNESS_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"
+)
 
 
 def build_witness_instructions(persona: dict, object_labels: list) -> str:

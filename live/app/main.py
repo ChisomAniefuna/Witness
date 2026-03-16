@@ -183,10 +183,9 @@ async def websocket_live(websocket: WebSocket):
     # "Voice Activity Detection: Automatically detects when users finish speaking, enabling natural turn-taking without explicit signals.")
     run_config = RunConfig(
         streaming_mode=StreamingMode.BIDI,
-        response_modalities=["AUDIO"],
+        response_modalities=[types.Modality.AUDIO],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
-        session_resumption=types.SessionResumptionConfig(),
     )
     live_request_queue = LiveRequestQueue()
 
