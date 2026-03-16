@@ -2,6 +2,16 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import { GoogleGenAI, Type } from "@google/genai";
+import { voiceGuard } from "./voiceGuard.ts";
+import { responseGate, enforceMaxSentences } from "./responseGate.ts";
+import {
+  getSessionState,
+  markSpeaker,
+  updateSessionState,
+  incrementContradictions,
+  recordQuestion,
+} from "./sessionState.ts";
+import { getArchetypeIdentity, getBreakingPointLine } from "./archetypeLoader.ts";
 
 dotenv.config();
 
@@ -20,6 +30,74 @@ if (!apiKey) {
 }
 
 const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+
+function getSessionKey(req: express.Request) {
+  const headerKey = req.headers["x-session-id"];
+  const headerValue = Array.isArray(headerKey) ? headerKey[0] : headerKey;
+  return headerValue || req.body?.sessionId || req.ip || "default";
+}
+
+function buildOneTrueThingPrompt({
+  archetype,
+  verdictCorrect,
+}: {
+  archetype: string;
+  verdictCorrect: boolean;
+}) {
+  const verdict = verdictCorrect ? "correct" : "wrong";
+  return `You are ${archetype}. The detective just made a ${verdict} accusation. Say one completely true thing you have not said in this session. One sentence only. Plain language. No literary language. No similes. No directions to the detective.`;
+}
+
+async function generateOneTrueThing({
+  model,
+  archetype,
+  verdictCorrect,
+  mysteryContext,
+  sessionHistory,
+  witnessName,
+}: {
+  model: string;
+  archetype: string;
+  verdictCorrect: boolean;
+  mysteryContext: string;
+  sessionHistory: string[];
+  witnessName: string;
+}) {
+  const systemInstruction = buildOneTrueThingPrompt({
+    archetype: archetype || "Witness",
+    verdictCorrect,
+  });
+  const historyBlock = Array.isArray(sessionHistory)
+    ? sessionHistory.join("\n")
+    : "";
+  const prompt = `Mystery context:\n${mysteryContext || ""}\n\nSession history:\n${historyBlock}\n\nWitness name: ${witnessName || "Witness"}`;
+  const response = await ai.models.generateContent({
+    model,
+    contents: [{ parts: [{ text: prompt }] }],
+    config: { systemInstruction },
+  });
+  return response.text || "";
+}
+
+async function rewriteWitnessResponse({
+  model,
+  systemInstruction,
+  text,
+  reason,
+}: {
+  model: string;
+  systemInstruction: string;
+  text: string;
+  reason: string;
+}) {
+  const rewritePrompt = `Rewrite this witness response. It failed: ${reason}. Rules: first person, max 2 sentences, plain language only, no poetic language, no directions to the detective. Output only the witness dialogue.`;
+  const rewrite = await ai.models.generateContent({
+    model,
+    contents: [{ parts: [{ text: rewritePrompt }, { text }] }],
+    config: { systemInstruction },
+  });
+  return rewrite.text || text;
+}
 
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true, service: "witness-backend" });
@@ -91,7 +169,12 @@ app.post("/api/scene-analyze", async (req, res) => {
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    const payload = JSON.parse(response.text || "{}");
+    if (payload?.witnessReaction) {
+      const guarded = voiceGuard(payload.witnessReaction, "witness");
+      payload.witnessReaction = enforceMaxSentences(guarded.text, 2);
+    }
+    res.json(payload);
   } catch (err) {
     console.error("scene-analyze error", err);
     res.status(500).json({ error: "scene-analyze failed" });
@@ -144,7 +227,12 @@ app.post("/api/witness-persona", async (req, res) => {
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    const payload = JSON.parse(response.text || "{}");
+    if (payload?.openingStatement) {
+      const guarded = voiceGuard(payload.openingStatement, "witness");
+      payload.openingStatement = enforceMaxSentences(guarded.text, 2);
+    }
+    res.json(payload);
   } catch (err) {
     console.error("witness-persona error", err);
     res.status(500).json({ error: "witness-persona failed" });
@@ -170,18 +258,57 @@ app.post("/api/interrogation", async (req, res) => {
       objects: string[];
     };
 
+    const sessionKey = getSessionKey(req);
+    const state = getSessionState(sessionKey);
+    updateSessionState(sessionKey, {
+      archetype: persona?.archetype || state.archetype,
+      witnessName: persona?.name || state.witnessName,
+    });
+
+    const lastMessage = messages?.[messages.length - 1];
+    if (lastMessage?.role === "user") markSpeaker(sessionKey, "detective");
+    const lastUserMessage =
+      [...messages].reverse().find((m) => m.role === "user")?.text || "";
+
     const model = "gemini-3-flash-preview";
+    const identityBlock = getArchetypeIdentity(persona?.archetype, persona?.name);
     const systemInstruction = `
+      ${identityBlock}
       You are ${persona.name}, a ${persona.archetype}, age ${persona.age}, occupation ${persona.occupation}.
       You are being interrogated about a crime in a room containing:
       [${objects.join(", ")}]. You are guilty. Your secret: ${persona.secret}. Your tells when
       lying: ${persona.tells.join(
         ", "
-      )}. Respond in character — nervous, evasive, occasionally
-      slipping. Keep responses under 80 words. Occasionally insert
-      [CONTRADICTION] before a statement that contradicts something said
-      earlier. Never admit guilt directly.
+      )}. Respond in character — nervous, evasive, occasionally slipping.
+      Rules:
+      - You are the witness voice only. First person only.
+      - Max 2 sentences per response. Short sentences.
+      - No similes, no metaphors, no poetic language.
+      - Never direct the detective (no "check", "look", "find", "go to").
+      - Never volunteer evidence. Answer only what is asked.
+      - Never speak twice in a row.
+      - Occasionally insert [CONTRADICTION] before a statement that contradicts something said earlier.
+      - Never admit guilt directly.
     `;
+
+    if (state.trueThingSaid) {
+      return res.json({ text: "" });
+    }
+    if (state.lastSpeaker === "witness") {
+      return res.json({ text: "" });
+    }
+    if (state.accusationMade && !state.trueThingSaid) {
+      const truthLine = state.oneTrueThingLine || "";
+      updateSessionState(sessionKey, { trueThingSaid: true });
+      markSpeaker(sessionKey, "witness");
+      return res.json({ text: truthLine });
+    }
+    if (state.contradictionsFound >= 2 && !state.breakingPointFired) {
+      const line = getBreakingPointLine(persona?.archetype, persona?.name);
+      updateSessionState(sessionKey, { breakingPointFired: true });
+      markSpeaker(sessionKey, "witness");
+      return res.json({ text: line });
+    }
 
     const response = await ai.models.generateContent({
       model,
@@ -194,7 +321,43 @@ app.post("/api/interrogation", async (req, res) => {
       },
     });
 
-    res.json({ text: response.text || "I... I don't know what to say." });
+    const rawText = response.text || "I... I don't know what to say.";
+    const guarded = voiceGuard(rawText, "witness");
+    const gated = responseGate({
+      text: guarded.text,
+      lastUserMessage,
+      state,
+      objectLabels: objects,
+    });
+    let finalText = gated.text;
+    let issues = [...guarded.issues, ...gated.issues];
+
+    if (issues.length > 0) {
+      const rewritten = await rewriteWitnessResponse({
+        model,
+        systemInstruction,
+        text: guarded.text,
+        reason: issues.join(", "),
+      });
+      const guardedRetry = voiceGuard(rewritten, "witness");
+      const gatedRetry = responseGate({
+        text: guardedRetry.text,
+        lastUserMessage,
+        state,
+        objectLabels: objects,
+      });
+      finalText = gatedRetry.text;
+      issues = [...guardedRetry.issues, ...gatedRetry.issues];
+      if (issues.length > 0) {
+        finalText = enforceMaxSentences(finalText, 2);
+      }
+    }
+
+    finalText = enforceMaxSentences(finalText, 2);
+    markSpeaker(sessionKey, "witness");
+    recordQuestion(sessionKey, finalText);
+
+    res.json({ text: finalText || "I... I don't know what to say." });
   } catch (err) {
     console.error("interrogation error", err);
     res.status(500).json({ error: "interrogation failed" });
@@ -206,6 +369,7 @@ app.post("/api/contradiction", async (req, res) => {
     const { messages } = req.body as {
       messages: { role: "user" | "witness"; text: string }[];
     };
+    const sessionKey = getSessionKey(req);
     const model = "gemini-3-flash-preview";
     const lastMessages = messages.slice(-6);
     const prompt = `
@@ -235,7 +399,13 @@ app.post("/api/contradiction", async (req, res) => {
       },
     });
 
-    res.json(JSON.parse(response.text || '{"contradiction":false,"quote":""}'));
+    const payload = JSON.parse(
+      response.text || '{"contradiction":false,"quote":""}'
+    );
+    if (payload?.contradiction) {
+      incrementContradictions(sessionKey);
+    }
+    res.json(payload);
   } catch (err) {
     console.error("contradiction error", err);
     res.status(500).json({ error: "contradiction failed" });
@@ -279,6 +449,30 @@ app.post("/api/engagement", async (req, res) => {
     const { persona } = req.body as {
       persona: { name: string; archetype: string };
     };
+    const sessionKey = getSessionKey(req);
+    const state = getSessionState(sessionKey);
+    updateSessionState(sessionKey, {
+      archetype: persona?.archetype || state.archetype,
+      witnessName: persona?.name || state.witnessName,
+    });
+    if (state.trueThingSaid) {
+      return res.json({ text: "" });
+    }
+    if (state.lastSpeaker === "witness") {
+      return res.json({ text: "" });
+    }
+    if (state.accusationMade && !state.trueThingSaid) {
+      const truthLine = state.oneTrueThingLine || "";
+      updateSessionState(sessionKey, { trueThingSaid: true });
+      markSpeaker(sessionKey, "witness");
+      return res.json({ text: truthLine });
+    }
+    if (state.contradictionsFound >= 2 && !state.breakingPointFired) {
+      const line = getBreakingPointLine(persona?.archetype, persona?.name);
+      updateSessionState(sessionKey, { breakingPointFired: true });
+      markSpeaker(sessionKey, "witness");
+      return res.json({ text: line });
+    }
     const model = "gemini-3-flash-preview";
     const prompt = `
       You are ${persona.name}, a ${persona.archetype}. The detective is being quiet or unhelpful.
@@ -291,11 +485,14 @@ app.post("/api/engagement", async (req, res) => {
       contents: [{ parts: [{ text: prompt }] }],
     });
 
-    res.json({
-      text:
-        response.text ||
-        "Why aren't you saying anything? The silence is deafening.",
-    });
+    const rawText =
+      response.text ||
+      "Why aren't you saying anything? The silence is deafening.";
+    const guarded = voiceGuard(rawText, "witness");
+    const finalText = enforceMaxSentences(guarded.text, 2);
+    markSpeaker(sessionKey, "witness");
+    recordQuestion(sessionKey, finalText);
+    res.json({ text: finalText });
   } catch (err) {
     console.error("engagement error", err);
     res.status(500).json({ error: "engagement failed" });
@@ -348,10 +545,22 @@ app.post("/api/accusation-options", async (req, res) => {
 
 app.post("/api/evaluate", async (req, res) => {
   try {
-    const { accusation, truth } = req.body as {
-      accusation: { suspect: string; method: string; motive: string };
-      truth: { witness: string; objects: string[]; guiltyOf: string };
-    };
+    const { accusation, truth, persona, mysteryContext, sessionHistory } =
+      req.body as {
+        accusation: { suspect: string; method: string; motive: string };
+        truth: { witness: string; objects: string[]; guiltyOf: string };
+        persona?: { name: string; archetype: string };
+        mysteryContext?: string;
+        sessionHistory?: string[];
+      };
+    const sessionKey = getSessionKey(req);
+    updateSessionState(sessionKey, {
+      accusationMade: true,
+      mysteryContext: mysteryContext || "",
+      sessionHistory: Array.isArray(sessionHistory) ? sessionHistory : [],
+      archetype: persona?.archetype || getSessionState(sessionKey).archetype,
+      witnessName: persona?.name || getSessionState(sessionKey).witnessName,
+    });
     const model = "gemini-3-flash-preview";
     const prompt = `
       The player accused ${accusation.suspect} using ${accusation.method} motivated by ${accusation.motive}.
@@ -380,7 +589,38 @@ app.post("/api/evaluate", async (req, res) => {
       },
     });
 
-    res.json(JSON.parse(response.text || "{}"));
+    const payload = JSON.parse(response.text || "{}");
+    if (typeof payload?.correct === "boolean") {
+      updateSessionState(sessionKey, {
+        verdictCorrect: payload.correct,
+      });
+    }
+    let oneTrueThingLine = "";
+    if (
+      persona?.archetype &&
+      Array.isArray(sessionHistory) &&
+      sessionHistory.length > 0
+    ) {
+      const rawTruth = await generateOneTrueThing({
+        model,
+        archetype: persona.archetype,
+        verdictCorrect: payload.correct === true,
+        mysteryContext: mysteryContext || "",
+        sessionHistory,
+        witnessName: persona?.name || "Witness",
+      });
+      const guarded = voiceGuard(rawTruth, "witness");
+      const oneSentence = enforceMaxSentences(guarded.text, 1);
+      updateSessionState(sessionKey, {
+        oneTrueThingLine: oneSentence,
+      });
+      oneTrueThingLine = oneSentence;
+    } else {
+      updateSessionState(sessionKey, { oneTrueThingLine: "" });
+    }
+    (payload as { oneTrueThingLine?: string }).oneTrueThingLine =
+      oneTrueThingLine;
+    res.json(payload);
   } catch (err) {
     console.error("evaluate error", err);
     res.status(500).json({ error: "evaluate failed" });

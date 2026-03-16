@@ -13,3 +13,6 @@ live/.env
 resources/
 node_modules/
 .vscode/
+tmp/
+tmp_*.txt
+tmp_*.py

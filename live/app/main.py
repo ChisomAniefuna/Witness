@@ -172,13 +172,21 @@ async def websocket_live(websocket: WebSocket):
 
     # Use default automatic VAD for seamless turn-taking (per official Bidi docs:
     # "Voice Activity Detection: Automatically detects when users finish speaking, enabling natural turn-taking without explicit signals.")
-    run_config = RunConfig(
+    run_config_kwargs = dict(
         streaming_mode=StreamingMode.BIDI,
         response_modalities=["AUDIO"],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
-        session_resumption=types.SessionResumptionConfig(),
     )
+    try:
+        run_config = RunConfig(
+            **run_config_kwargs,
+            session_resumption=types.SessionResumptionConfig(),
+        )
+    except Exception as e:
+        # Older ADK RunConfig versions don't accept session_resumption.
+        logger.warning("RunConfig does not accept session_resumption; continuing without it: %s", e)
+        run_config = RunConfig(**run_config_kwargs)
     live_request_queue = LiveRequestQueue()
 
     await websocket.send_text(
