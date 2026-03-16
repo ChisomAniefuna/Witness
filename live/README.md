@@ -36,6 +36,27 @@ cp .env.example .env        # set GOOGLE_API_KEY or GOOGLE_GENAI_API_KEY
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
+### Live model configuration
+
+If your key/project cannot access the default Live model, set an explicit override in `live/.env`:
+
+```bash
+# Broadly compatible AI Studio Live model
+WITNESS_LIVE_MODEL=gemini-live-2.5-flash-preview
+
+# Optional list shown in error payload/logs for quick switching
+WITNESS_LIVE_FALLBACK_MODELS=gemini-live-2.5-flash-preview,gemini-2.0-flash-live-001
+```
+
+For Vertex mode, set:
+
+```bash
+GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_PROJECT=your-project
+GOOGLE_CLOUD_LOCATION=us-central1
+WITNESS_LIVE_MODEL=gemini-live-2.5-flash
+```
+
 - **Health**: [http://localhost:8081/health](http://localhost:8081/health)
 - **Test harness**: [http://localhost:8081/test-live](http://localhost:8081/test-live) – connect, init, then use mic or text.
 
@@ -49,3 +70,10 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 6. Server streams ADK events as JSON (content with parts, transcriptions, interrupted, turn_complete, etc.). Client stops witness playback when `interrupted: true`.
 
 **Note:** If the server logs `1008 (policy violation)` and the session drops, the Live API or model may not be enabled for your project or key; check Google AI Studio / Cloud and the model allowlist.
+
+Quick checks for `1008`:
+
+1. Confirm you are using a Live-capable model name for your platform.
+2. If on AI Studio API key, start with `gemini-live-2.5-flash-preview`.
+3. If on Vertex, set `GOOGLE_GENAI_USE_VERTEXAI=true` and Cloud project/location vars.
+4. Restart the live server after changing model/env settings.

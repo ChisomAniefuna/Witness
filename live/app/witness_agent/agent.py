@@ -14,17 +14,28 @@ def _is_truthy(value: str | None) -> bool:
 
 
 def _default_live_model() -> str:
-    # Align with resources/Bidi_docs.txt defaults:
-    # - Gemini Live API (AI Studio): gemini-2.5-flash-native-audio-preview-12-2025
-    # - Vertex AI Live API: gemini-live-2.5-flash-native-audio
+    # Choose defaults that maximize compatibility first.
+    # Some projects/keys return 1008 for native-audio preview models
+    # when that feature/model is not enabled.
     use_vertex = _is_truthy(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
     if use_vertex:
-        return "gemini-live-2.5-flash-native-audio"
-    return "gemini-2.5-flash-native-audio-preview-12-2025"
+        # Vertex Live model (widely available naming).
+        return "gemini-live-2.5-flash"
+    # AI Studio Live model with stable bidiGenerateContent support.
+    return "gemini-2.0-flash-live-001"
 
 
 # Allow explicit override, otherwise choose platform-aware default.
 WITNESS_LIVE_MODEL = os.getenv("WITNESS_LIVE_MODEL", _default_live_model())
+
+# Optional comma-separated fallback models for diagnostics/recovery guidance.
+# Example:
+# WITNESS_LIVE_FALLBACK_MODELS=gemini-2.0-flash-live-001,gemini-live-2.5-flash-preview
+WITNESS_LIVE_FALLBACK_MODELS = [
+    m.strip()
+    for m in os.getenv("WITNESS_LIVE_FALLBACK_MODELS", "").split(",")
+    if m.strip()
+]
 
 
 def build_witness_instructions(persona: dict, object_labels: list) -> str:

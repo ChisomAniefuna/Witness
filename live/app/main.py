@@ -32,17 +32,26 @@ from google.adk.agents.run_config import RunConfig, StreamingMode  # pyright: ig
 from google.adk.runners import Runner  # pyright: ignore[reportMissingImports]
 from google.adk.sessions import InMemorySessionService  # pyright: ignore[reportMissingImports]
 
-from app.witness_agent.agent import build_witness_instructions, create_witness_agent
-from app.witness_agent.agent import WITNESS_LIVE_MODEL
-
 # Load .env from live/ so it works whether we run from repo root or live/
 _env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_env_path)
 # google-genai SDK expects GOOGLE_API_KEY; accept GOOGLE_GENAI_API_KEY too
 if not os.getenv("GOOGLE_API_KEY") and os.getenv("GOOGLE_GENAI_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.environ["GOOGLE_GENAI_API_KEY"]
+
+# Import agent config only after dotenv/env mapping, so model flags from live/.env
+# (e.g. GOOGLE_GENAI_USE_VERTEXAI, WITNESS_LIVE_MODEL) are applied correctly.
+from app.witness_agent.agent import (
+    build_witness_instructions,
+    create_witness_agent,
+    WITNESS_LIVE_FALLBACK_MODELS,
+    WITNESS_LIVE_MODEL,
+)
+
 logger = logging.getLogger(__name__)
 logger.info("Witness Live model: %s", WITNESS_LIVE_MODEL)
+if WITNESS_LIVE_FALLBACK_MODELS:
+    logger.info("Witness Live fallback models: %s", WITNESS_LIVE_FALLBACK_MODELS)
 
 APP_NAME = "witness-live"
 USER_ID_MVP = "witness-user"
@@ -285,6 +294,12 @@ async def websocket_live(websocket: WebSocket):
                     "type": "error",
                     "message": "Live API connection closed",
                     "detail": str(e),
+                    "model": WITNESS_LIVE_MODEL,
+                    "hint": (
+                        "Try setting WITNESS_LIVE_MODEL to a supported Live model for this key/project. "
+                        "If using Vertex, also set GOOGLE_GENAI_USE_VERTEXAI=true with GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION."
+                    ),
+                    "fallback_models": WITNESS_LIVE_FALLBACK_MODELS,
                 }
                 await websocket.send_text(json.dumps(error_payload))
             except Exception:

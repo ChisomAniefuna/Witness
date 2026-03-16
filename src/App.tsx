@@ -976,6 +976,33 @@ export default function App() {
     }
   }, [currentScreen]);
 
+  useEffect(() => {
+    if (!liveError) return;
+    const normalized = liveError.toLowerCase();
+    const isModelAvailabilityIssue =
+      normalized.includes('publisher model') ||
+      (normalized.includes('model') &&
+        (normalized.includes('not found') ||
+          normalized.includes('not supported for bidigeneratecontent') ||
+          normalized.includes('operation is not implemented')));
+
+    if (!isModelAvailabilityIssue) return;
+    if (interrogationMode !== 'voice') return;
+
+    // Graceful degrade when Live model is unavailable for the project/key.
+    stopVoiceInterrogation();
+    setInterrogationMode('text');
+    setMessages(prev => {
+      const notice =
+        'Voice mode is currently unavailable for this project configuration. Switched to text interrogation so you can continue the case.';
+      const alreadyAdded = prev.some(
+        m => m.role === 'witness' && m.text === notice
+      );
+      if (alreadyAdded) return prev;
+      return [...prev, { role: 'witness', text: notice }];
+    });
+  }, [liveError, interrogationMode]);
+
   const beginInterrogation = () => {
     if (!persona) return;
 
