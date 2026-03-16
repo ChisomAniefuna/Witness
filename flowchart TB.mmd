@@ -1,0 +1,56 @@
+flowchart TB
+    %% Professional architecture for Devpost (Google service emphasis)
+
+    subgraph CL[Client Layer]
+        U[Web Browser]
+        FE[React SPA]
+    end
+
+    subgraph GCP[Google Cloud]
+        FB[Firebase Hosting\nStatic assets + CDN]
+
+        subgraph RUN[Cloud Run Services\nus-central1]
+            API[Node.js Backend Service\nREST API]
+            LIVE[Python Live Agent Service\nUvicorn + Realtime]
+        end
+
+        CB[Cloud Build\nCI/CD Pipeline]
+    end
+
+    subgraph GEN[Gemini AI Services]
+        GAPI[Gemini API\nText + structured inference]
+        GLIVE[Gemini Live API\nStreaming audio interaction]
+    end
+
+    subgraph DATA[Application State]
+        DB[(SQLite state store)]
+    end
+
+    U --> FE
+    FE -->|Serves app bundle| FB
+
+    FE -->|HTTPS REST calls| API
+    FE -->|Realtime audio session| LIVE
+
+    API -->|Model inference| GAPI
+    LIVE -->|Bidirectional stream| GLIVE
+
+    API -->|Read/Write| DB
+    LIVE -->|Read/Write| DB
+
+    CB -->|Build + deploy| API
+    CB -->|Build + deploy| LIVE
+
+    classDef gBlue fill:#4285F4,color:#ffffff,stroke:#1a73e8,stroke-width:1px
+    classDef gGreen fill:#34A853,color:#ffffff,stroke:#188038,stroke-width:1px
+    classDef gRed fill:#EA4335,color:#ffffff,stroke:#c5221f,stroke-width:1px
+    classDef gYellow fill:#FBBC04,color:#202124,stroke:#f9ab00,stroke-width:1px
+    classDef neutral fill:#f8f9fa,color:#202124,stroke:#9aa0a6,stroke-width:1px
+    classDef data fill:#202124,color:#ffffff,stroke:#5f6368,stroke-width:1px
+
+    class FB gBlue
+    class API,LIVE gGreen
+    class CB gRed
+    class GAPI,GLIVE gYellow
+    class U,FE neutral
+    class DB data

@@ -1,222 +1,202 @@
 <div align="center">
   <img width="1200" height="475" alt="Witness Banner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+
+  # Witness
+
+  ### Every Room Tells a Story. Every Object Hides a Clue.
+
+  Witness is a multimodal noir murder-mystery built for the Gemini Live Agent Challenge.
+  Your real room becomes the crime scene, and an AI witness responds in text and live voice.
 </div>
 
-## Witness
+---
 
-**Every Room Tells A Story. Every Object Hides A Clue.**  
-Witness is a noir murder‑mystery experience for the Gemini Live Agent Challenge.  
-You point your camera at a real room; Gemini turns it into a crime scene and becomes the only witness you can interrogate.
+## Table of Contents
+- Overview
+- What Makes Witness Different
+- Architecture
+- Tech Stack
+- Local Development
+- Deploy to Google Cloud
+- Project Structure
+- Hackathon Alignment
 
 ---
 
-### In a nutshell
+## Overview
+Witness turns physical space into interactive narrative gameplay:
 
-- **Scan any real room** – The camera feed is analysed by Gemini; objects become evidence (mug, window, chair, ceiling fan…) with bounding boxes and atmospheric descriptions.
-- **Meet the AI witness** – Gemini generates a persona (name, archetype, age, occupation, nervous tells, opening statement, motive, secret) grounded in that specific room.
-- **Interrogate in real time** – You question the witness about objects and events. They lie, evade, and contradict themselves; an agent flags contradictions in the UI.
-- **Make your accusation** – Choose suspect, method, and motive from options tied to the scene. Gemini evaluates how close you are to the truth.
-- **Receive a case file** – A generated dossier explains what really happened, plus a timeline and interrogation stats.
+- Scan a real room with your camera
+- Generate room-aware evidence and witness persona
+- Interrogate via text and live voice
+- Detect contradictions during questioning
+- Submit accusation and receive a generated case file
 
----
+This project is designed to move beyond text-only chat by combining vision, realtime audio, and agentic orchestration.
 
-### Why this project
-
-The Gemini Live Agent Challenge asks builders to break the text‑box paradigm.  
-Witness does this by turning **your physical space** into the game board:
-
-- Vision: the room scan is not a background – it *is* the mystery.
-- Language: the witness persona and interrogation are fully AI‑driven.
-- Agents: engagement, contradiction detection, and safety logic keep the story tense and playable.
-
-Our goal is an experience that feels more like stepping into a crime scene than “using an app”.
+## What Makes Witness Different
+- Scene-grounded mystery generation: objects and atmosphere are derived from your actual room scan.
+- Live witness interaction: voice interrogation is streamed through a dedicated realtime backend.
+- Agentic control loop: contradiction detection, safety checks, and engagement nudges keep the narrative playable.
+- End-to-end cloud deployment: frontends and backends run on Google Cloud services.
 
 ---
 
-### Architecture
+## Architecture
+<div align="center">
+  <img width="1400" alt="Witness Architecture Diagram" src="./ArchitectureWitness.png" />
+</div>
 
-**Frontend** (`/src`)
+Architecture source (editable Mermaid): [flowchart TB.mmd](flowchart%20TB.mmd)
 
-- `App.tsx` – Single‑page React app (Vite + TypeScript) with the full flow:
-  - Splash → onboarding → camera/scene → witness → interrogation → accusation → case file.
-  - Camera via `getUserMedia`, HUD overlays, and animated noir UI.
-- `services/geminiService.ts` – Thin client talking to the backend HTTP API.
-- Styling – Tailwind v4 with custom noir palette and motion (`motion` library) for transitions.
-
-**Backend (Node)** (`/server`)
-
-- `index.js` – Node + Express API wrapping the Google GenAI SDK (`@google/genai`):
-  - `POST /api/scene-analyze` – image → JSON objects + witness reaction (Gemini `gemini-2.5-flash`).
-  - `POST /api/witness-persona` – room objects → persona JSON.
-  - `POST /api/interrogation` – conversation history + persona → witness reply.
-  - `POST /api/contradiction` – recent history → `{ contradiction, quote }`.
-  - `POST /api/safety` – user text → `{ safe, reason }`.
-  - `POST /api/engagement` – re‑engagement line if the detective goes quiet.
-  - `POST /api/accusation-options` – suspects, methods, motives for the final accusation.
-  - `POST /api/evaluate` – accusation vs. ground truth → verdict + explanation.
-  - `POST /api/casefile-timeline` – 4‑step narrative of what actually happened.
-
-**Live service (Python)** (`/live`)
-
-- FastAPI + Google ADK: WebSocket `ws://host:8081/live` for **bidirectional voice interrogation** during the interrogation phase.
-- The frontend connects when you tap **Start voice interrogation**; mic audio is streamed as 16 kHz PCM, and the witness replies with voice + text. Session is in-memory (persona + object labels injected into the agent). No Firestore in this phase.
-- Requires `GOOGLE_GENAI_API_KEY` (see `live/.env.example`). Optional: `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` for Vertex.
-
-Environment:
-
-- **Node**: `GEMINI_API_KEY` in `.env`; **frontend**: `VITE_API_BASE_URL` and `VITE_LIVE_WS_URL` in `.env.local` (see below).
+### Service Roles
+- Client: React single-page app in browser
+- Hosting: Firebase Hosting serves static assets and SPA routes
+- Backend 1: Node.js Cloud Run API for scene analysis, persona, interrogation, accusation flow
+- Backend 2: Python Cloud Run live service for realtime voice sessions (FastAPI + ADK)
+- AI: Gemini API for inference and Gemini Live API for streaming interactions
+- Data: SQLite-backed runtime state
+- Delivery: Cloud Build pipeline for automated image build + deploy
 
 ---
 
-### Getting started (local)
+## Tech Stack
+### Frontend
+- React + TypeScript + Vite
+- Tailwind CSS v4
+- Motion animations
 
-**Prerequisites**
+### Backend (Node)
+- Express
+- Google GenAI SDK
 
-- Node.js 20+ (we develop with the latest LTS)
-- A Gemini API key from Google AI Studio
+### Live Backend (Python)
+- FastAPI + Uvicorn
+- Google ADK (Agent Development Kit)
+- WebSocket streaming
 
-**1. Clone and install**
+### Cloud
+- Firebase Hosting
+- Cloud Run
+- Cloud Build
 
+---
+
+## Local Development
+### Prerequisites
+- Node.js 20+
+- Python 3.11+
+- Gemini API key
+
+### 1) Install dependencies
 ```bash
-git clone https://github.com/YOUR_ORG/witness.git
-cd witness
 npm install
 ```
 
-**2. Configure environment**
-
-Backend (`.env` in project root):
-
+### 2) Configure environment files
+Create root .env:
 ```bash
-GEMINI_API_KEY=your_real_key_here
+GEMINI_API_KEY=your_key_here
 ```
 
-Frontend (`.env.local` in project root):
-
+Create root .env.local:
 ```bash
 VITE_API_BASE_URL="http://localhost:8080"
-# Optional: for voice interrogation (Python Live service). Defaults to ws://localhost:8081/live if unset.
 VITE_LIVE_WS_URL="ws://localhost:8081"
 ```
 
-**3. Run backends and frontend**
+Create live/.env from live/.env.example:
+```bash
+GOOGLE_GENAI_API_KEY=your_key_here
+PORT=8081
+```
 
-You can run **text-only interrogation** with just the Node backend. For **voice interrogation**, run both backends.
-
-Terminal 1 – Node backend (required):
-
+### 3) Run services
+Terminal A (Node API):
 ```bash
 npm run server
 ```
 
-Terminal 2 – Python Live service (optional; for voice):
-
+Terminal B (Live Python API):
 ```bash
 cd live
 python3 -m venv .venv
-source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-# Create live/.env from live/.env.example and set GOOGLE_GENAI_API_KEY
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
-Create `live/.env` from `live/.env.example` and set `GOOGLE_GENAI_API_KEY` (and optionally `PORT=8081`). On macOS, use `python3` and `pip` (after activating the venv) if `python` is not available.
-
-**Test the Live service without the full app** (saves tokens and time): With the Python Live service running, open **http://localhost:8081/test-live** in your browser. Use “Connect & init” then “Start mic” or the text box to talk to a fixed sample witness. No room scan or persona generation—use this to verify voice and responses before running the full flow.
-
-Terminal 3 – Frontend:
-
+Terminal C (Frontend):
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:3000` and play through:
-
-1. Splash → **Begin Investigation** → **Enter the Scene**.  
-2. Point the camera at a real room, tap the shutter, wait for analysis + bounding boxes.  
-3. Tap **MEET THE WITNESS →**, read the persona, then **BEGIN INTERROGATION**.  
-4. Use the text input and **SEND**, or tap **Start voice interrogation** to talk and hear the witness (requires the Python Live service on port 8081). Catch contradictions, then **MAKE ACCUSATION** and submit a verdict.  
-5. Review the generated case file.
+Open:
+- Frontend: http://localhost:3000
+- Live test page: http://localhost:8081/test-live
 
 ---
 
-### Deploying to Google Cloud Run (backend)
-
-The repo includes a minimal deployment pipeline:
-
-- `Dockerfile` – builds a Node image for the Express backend.
-- `cloudbuild.yaml` – builds, pushes, and deploys `witness-backend` to Cloud Run.
-
-Basic flow:
-
+## Deploy to Google Cloud
+### Backend (Node Cloud Run)
 ```bash
 gcloud builds submit --config=cloudbuild.yaml .
 ```
+Set Cloud Run environment variable:
+- GEMINI_API_KEY
 
-Then in Cloud Run:
-
-- Set `GEMINI_API_KEY` as an environment variable.
-- Copy the service URL and use it as `VITE_API_BASE_URL` for your deployed frontend.
-
-**Deploying the Python Live service (voice)**
-
-To run voice interrogation in production, deploy the Live service as a second Cloud Run service:
-
+### Live Backend (Python Cloud Run)
 ```bash
 gcloud builds submit --config=cloudbuild-live.yaml .
 ```
+Set Cloud Run environment variable:
+- GOOGLE_GENAI_API_KEY
 
-Build context is the `live/` directory (see `cloudbuild-live.yaml`). In Cloud Run, set `GOOGLE_GENAI_API_KEY` (and optionally Vertex env vars). Then set the frontend’s `VITE_LIVE_WS_URL` to the Live service URL, e.g. `wss://witness-live-xxxx.run.app` (use `wss://` for HTTPS).
+### Frontend (Firebase Hosting)
+Build with deployed backend URLs:
+```bash
+VITE_API_BASE_URL="https://YOUR_NODE_SERVICE.run.app" \
+VITE_LIVE_WS_URL="wss://YOUR_LIVE_SERVICE.run.app" \
+npm run build
+```
 
-**Hosting the frontend (Firebase Hosting)**
+Deploy:
+```bash
+firebase deploy --only hosting --project witness-489710
+```
 
-Host the Vite app on **Firebase Hosting** (not Firestore; Firestore is a database). After both Cloud Run services are deployed:
-
-1. **One-time: enable Firebase for your GCP project**  
-   Go to [Firebase Console](https://console.firebase.google.com/) → **Add project** → choose your existing GCP project (e.g. `witness-489710`). Then open **Build → Hosting** and click **Get started** to create the default Hosting site.
-2. **Install Firebase CLI** (if needed): `npm install -g firebase-tools` then `firebase login`.
-3. **Link the project**: `firebase use witness-489710` (or your project id). Ensure `firebase.json` has `"site": "witness-489710"` under `hosting` so deploys target the right site.
-4. **Build the app with production API URLs** (replace with your Cloud Run URLs):
-
-   ```bash
-   VITE_API_BASE_URL="https://witness-backend-XXXXX-uc.a.run.app" \
-   VITE_LIVE_WS_URL="wss://witness-live-XXXXX-uc.a.run.app" \
-   npm run build
-   ```
-
-5. **Deploy**:
-
-   ```bash
-   firebase deploy
-   ```
-
-   The repo includes `firebase.json` so Firebase Hosting serves the `dist/` folder with SPA rewrites. Your app will be at `https://witness-489710.web.app` (or your custom domain).
-
-**Deploy order**
-
-1. Deploy Node backend → note URL → set `GEMINI_API_KEY` in Cloud Run.  
-2. Deploy Live service → note URL → set `GOOGLE_GENAI_API_KEY` in Cloud Run.  
-3. Build frontend with those two URLs, then `firebase deploy`.
+### Current Deployment URLs
+- Frontend: https://witness-489710.web.app
+- Node backend: https://witness-backend-640883260430.us-central1.run.app
+- Live backend: https://witness-live-640883260430.us-central1.run.app
 
 ---
 
-### Repo structure
-
-- `src/` – React app (UI, flows, animations).
-- `src/services/geminiService.ts` – frontend API client for the Node backend.
-- `src/hooks/useWitnessLive.ts` – WebSocket hook for Live voice interrogation (connect, mic, playback, transcripts).
-- `server/` – Express backend + Gemini GenAI (scene, persona, interrogation, contradiction, accusation, case file).
-- `live/` – Python FastAPI + ADK Live service (WebSocket `/live`, witness agent, in-memory session).
-- `live/app/main.py` – FastAPI app and WebSocket handler; `live/app/witness_agent/agent.py` – ADK witness agent.
-- `resources/` – PRD, team brief, Devpost draft, and build task checklist (not committed in git).
-- `cloudbuild.yaml` – Cloud Build pipeline for Node backend.
-- `cloudbuild-live.yaml` – Cloud Build pipeline for Python Live service.
-- `Dockerfile` – Node backend image; `live/Dockerfile` – Python Live image.
-- `firebase.json` – Firebase Hosting config (serves `dist/` with SPA rewrites).
+## Project Structure
+- [src](src): React app UI, flow logic, hooks, and services
+- [server](server): Express backend and Gemini integration
+- [live](live): Python realtime backend and witness ADK agent
+- [cloudbuild.yaml](cloudbuild.yaml): Cloud Build pipeline for Node backend
+- [cloudbuild-live.yaml](cloudbuild-live.yaml): Cloud Build pipeline for live backend
+- [firebase.json](firebase.json): Firebase Hosting configuration
+- [ArchitectureWitness.png](ArchitectureWitness.png): Final architecture image for docs and Devpost
+- [flowchart TB.mmd](flowchart%20TB.mmd): Editable Mermaid architecture source
 
 ---
 
-### Hackathon notes
+## Hackathon Alignment
+This project aligns with Gemini Live Agent Challenge requirements:
 
-This project is being built for the **Gemini Live Agent Challenge** in the **Creative Storyteller** / **Live Agent** tracks.  
-There is an up‑to‑date checklist of remaining work in `resources/BUILD_TASKS.md` (Live audio, richer case file output, ADK‑style agent orchestration, and final Cloud Run deployment + demo video).
+- Uses Gemini models for scene understanding, persona generation, and interrogation
+- Uses ADK for realtime live agent behavior
+- Runs backend services on Google Cloud Run
+- Uses Firebase Hosting for frontend delivery
+- Includes architecture diagram and reproducible deployment path
+
+---
+
+If you are a judge or reviewer, start here:
+1. Open the deployed frontend URL.
+2. Scan a room and generate a witness.
+3. Run both text and live voice interrogation.
+4. Submit an accusation and inspect the generated case file.
