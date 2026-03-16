@@ -417,9 +417,10 @@ export default function App() {
     const saved = localStorage.getItem('theme');
     return saved ? saved === 'dark' : true;
   });
-  const [cameraStatus, setCameraStatus] = useState<'idle' | 'live' | 'denied'>(
-    'idle'
-  );
+  const [cameraStatus, setCameraStatus] = useState<
+    'idle' | 'live' | 'denied' | 'unsupported'
+  >('idle');
+  const [cameraIssue, setCameraIssue] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [detections, setDetections] = useState<DetectionObject[]>(
     () => persistedState?.detections ?? []
@@ -554,7 +555,10 @@ export default function App() {
 
   const buildCaseSignatureFromLabels = (labels: string[]) => {
     if (!labels.length) return 'no-evidence';
-    return labels.map(l => l.trim().toLowerCase()).sort().join('|');
+    return labels
+      .map(l => l.trim().toLowerCase())
+      .sort()
+      .join('|');
   };
 
   const getEvidenceSignature = () => {
@@ -599,7 +603,9 @@ export default function App() {
   const commitWitnessPersona = (nextPersona: WitnessPersona) => {
     const personaWithAvatar = ensurePersonaAvatar(nextPersona);
     setPersona(personaWithAvatar);
-    setMessages([{ role: 'witness', text: personaWithAvatar.openingStatement }]);
+    setMessages([
+      { role: 'witness', text: personaWithAvatar.openingStatement },
+    ]);
     setLastMessageTime(Date.now());
     setIsGeneratingPersona(false);
     pendingPersonaRef.current = null;
@@ -873,7 +879,8 @@ export default function App() {
   useEffect(() => {
     if (interrogationMode !== 'voice' || !liveConnected) return;
     const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
 
     const recognition: any = new SpeechRecognition();
@@ -1211,25 +1218,104 @@ export default function App() {
   ]);
 
   const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== 'function'
+    ) {
+      setCameraStatus('unsupported');
+      setCameraIssue(
+        'Camera is not supported in this browser. Try Chrome, Safari, or Edge on a mobile device.'
+      );
+      return;
+    }
+
+    if (
+      typeof window !== 'undefined' &&
+      !window.isSecureContext &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1'
+    ) {
+      setCameraStatus('unsupported');
+      setCameraIssue(
+        'Camera access requires HTTPS. Open the app using a secure https:// URL.'
+      );
+      return;
+    }
+
+    setCameraIssue(null);
+
+    const attempts: MediaStreamConstraints[] = [
+      {
         video: {
-          facingMode: 'environment',
+          facingMode: { ideal: 'environment' },
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
         audio: false,
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-        setCameraStatus('live');
-        writeCameraPermission(true);
-        window.setTimeout(() => updateVideoBox(), 50);
+      },
+      {
+        video: {
+          facingMode: { ideal: 'user' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      },
+      { video: true, audio: false },
+    ];
+
+    let lastError: unknown = null;
+    try {
+      for (const constraints of attempts) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            streamRef.current = stream;
+            setCameraStatus('live');
+            writeCameraPermission(true);
+            window.setTimeout(() => updateVideoBox(), 50);
+            try {
+              await videoRef.current.play();
+            } catch {
+              // Ignore autoplay rejections. Video still starts on user interaction.
+            }
+          }
+          return;
+        } catch (err) {
+          lastError = err;
+        }
       }
+
+      throw lastError;
     } catch (err) {
       console.error('Camera error:', err);
-      setCameraStatus('denied');
+      const name =
+        err && typeof err === 'object' && 'name' in err
+          ? String((err as { name?: string }).name)
+          : '';
+
+      if (name === 'NotAllowedError' || name === 'SecurityError') {
+        setCameraStatus('denied');
+        setCameraIssue(
+          'Permission was blocked. Allow camera access in browser settings and tap Try Again.'
+        );
+      } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+        setCameraStatus('denied');
+        setCameraIssue(
+          'No compatible camera was found. Try another browser or switch to a device with a camera.'
+        );
+      } else if (name === 'NotReadableError' || name === 'AbortError') {
+        setCameraStatus('denied');
+        setCameraIssue(
+          'Camera is busy in another app. Close other camera apps and try again.'
+        );
+      } else {
+        setCameraStatus('denied');
+        setCameraIssue('Could not start camera. Please retry.');
+      }
+
       writeCameraPermission(false);
     }
   };
@@ -1277,7 +1363,8 @@ export default function App() {
       }
 
       const storedGranted = readCameraPermission();
-      const canQuery = typeof navigator !== 'undefined' &&
+      const canQuery =
+        typeof navigator !== 'undefined' &&
         'permissions' in navigator &&
         typeof navigator.permissions.query === 'function';
 
@@ -1574,21 +1661,7 @@ export default function App() {
     setUserInput('');
     setLastMessageTime(Date.now());
 
-    // 1. SAFETY MONITOR
-    const safety = await checkSafety(text);
-    if (!safety.safe) {
-      setIsSafetyFlagged(true);
-      setMessages(prev => [
-        ...prev,
-        { role: 'user', text },
-        {
-          role: 'witness',
-          text: "Let's focus on the case... I don't want to talk about that.",
-        },
-      ]);
-      return;
-    }
-
+    // Show the user's message immediately so taps always produce visible feedback.
     const userMsg: Message = { role: 'user', text };
     const newMessages: Message[] = [...messages, userMsg];
     setMessages(newMessages);
@@ -1602,6 +1675,26 @@ export default function App() {
     }
 
     try {
+      // 1. SAFETY MONITOR
+      // Do not block the entire send flow if safety service is temporarily unavailable.
+      try {
+        const safety = await checkSafety(text);
+        if (!safety.safe) {
+          setIsSafetyFlagged(true);
+          setMessages(prev => [
+            ...prev,
+            {
+              role: 'witness',
+              text: "Let's focus on the case... I don't want to talk about that.",
+            },
+          ]);
+          setIsInterrogating(false);
+          return;
+        }
+      } catch (safetyErr) {
+        console.warn('Safety check unavailable, continuing:', safetyErr);
+      }
+
       // Engagement Monitor: Fire if 3 consecutive short messages
       if (shortMessageCount >= 2) {
         setShortMessageCount(0);
@@ -1648,14 +1741,13 @@ export default function App() {
 
   const applyVerdictToProfile = (isCorrect: boolean) => {
     setDetectiveProfile(prev => {
-      const baseProfile: DetectiveProfile =
-        prev ?? {
-          displayName: detectiveName.trim() || 'DETECTIVE',
-          totalScore: 0,
-          casesSolved: 0,
-          casesAttempted: 0,
-          badges: [],
-        };
+      const baseProfile: DetectiveProfile = prev ?? {
+        displayName: detectiveName.trim() || 'DETECTIVE',
+        totalScore: 0,
+        casesSolved: 0,
+        casesAttempted: 0,
+        badges: [],
+      };
 
       const baseScore = isCorrect ? 120 : 40;
       const contradictionBonus = contradictionCount * 15;
@@ -1738,11 +1830,22 @@ export default function App() {
       setVerdict(res);
       applyVerdictToProfile(res.correct);
 
-      const t = await generateCaseFileTimeline(
-        persona,
-        detections.map(d => d.label)
-      );
-      setTimeline(t);
+      try {
+        const t = await generateCaseFileTimeline(
+          persona,
+          detections.map(d => d.label)
+        );
+        setTimeline(t);
+      } catch (timelineErr) {
+        console.error('Timeline generation error:', timelineErr);
+        // Keep the flow moving even if timeline generation fails.
+        setTimeline([
+          'Initial disturbance reported at the scene.',
+          `${persona.name} was identified as a key witness.`,
+          'Contradictions were detected during interrogation.',
+          'Final verdict submitted by the detective.',
+        ]);
+      }
       success = true;
     } catch (err) {
       console.error('Verdict error:', err);
@@ -1776,7 +1879,8 @@ export default function App() {
       .map(obj => obj.label.toLowerCase());
     return witnessMessages.slice(-3).map(msg => {
       const rawQuote = msg.contradictionQuote || msg.text;
-      const cleanedQuote = rawQuote.replace(/^\"+|\"+$/g, '').trim() || rawQuote;
+      const cleanedQuote =
+        rawQuote.replace(/^\"+|\"+$/g, '').trim() || rawQuote;
       const lowered = cleanedQuote.toLowerCase();
       const isCritical = flaggedLabels.some(
         label => label && lowered.includes(label)
@@ -1864,7 +1968,9 @@ export default function App() {
                 <button
                   onClick={toggleTheme}
                   className="text-ink4 hover:text-red-noir transition-colors"
-                  aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+                  aria-label={
+                    isDark ? 'Switch to light theme' : 'Switch to dark theme'
+                  }
                 >
                   {isDark ? <Sun size={16} /> : <Moon size={16} />}
                 </button>
@@ -1886,7 +1992,11 @@ export default function App() {
               <motion.div
                 initial={{ y: 40, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.4, duration: 1, ease: [0.16, 1, 0.3, 1] }}
+                transition={{
+                  delay: 0.4,
+                  duration: 1,
+                  ease: [0.16, 1, 0.3, 1],
+                }}
               >
                 <h1 className="font-display text-[clamp(80px,20vw,160px)] text-ink tracking-tighter leading-[0.75] mb-12 uppercase">
                   WITNESS
@@ -1899,7 +2009,8 @@ export default function App() {
                   <div className="h-px w-12 bg-red-noir/30" />
                 </div>
                 <p className="font-serif text-[clamp(20px,5.5vw,26px)] italic font-light text-ink2 leading-relaxed mb-20 max-w-sm mx-auto text-center">
-                  "The room remembers what the eyes forget. Point your lens at the truth."
+                  "The room remembers what the eyes forget. Point your lens at
+                  the truth."
                 </p>
               </motion.div>
 
@@ -1961,12 +2072,20 @@ export default function App() {
                 >
                   <defs>
                     <radialGradient id="doorGlow" cx="50%" cy="40%" r="60%">
-                      <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.25" />
+                      <stop
+                        offset="0%"
+                        stopColor="#f59e0b"
+                        stopOpacity="0.25"
+                      />
                       <stop offset="100%" stopColor="#f59e0b" stopOpacity="0" />
                     </radialGradient>
                     <linearGradient id="doorSpill" x1="0" y1="0" x2="1" y2="0">
                       <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.4" />
-                      <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.02" />
+                      <stop
+                        offset="100%"
+                        stopColor="#f59e0b"
+                        stopOpacity="0.02"
+                      />
                     </linearGradient>
                     <filter id="noise">
                       <feTurbulence
@@ -1991,39 +2110,103 @@ export default function App() {
                   />
 
                   {/* Light Spill on Floor */}
-                  <ellipse cx="180" cy="285" rx="120" ry="30" fill="url(#doorGlow)" opacity="0.5" />
+                  <ellipse
+                    cx="180"
+                    cy="285"
+                    rx="120"
+                    ry="30"
+                    fill="url(#doorGlow)"
+                    opacity="0.5"
+                  />
 
                   {/* Door Frame */}
-                  <rect x="100" y="30" width="160" height="255" fill="#000" stroke="#1a1a1a" strokeWidth="1" />
+                  <rect
+                    x="100"
+                    y="30"
+                    width="160"
+                    height="255"
+                    fill="#000"
+                    stroke="#1a1a1a"
+                    strokeWidth="1"
+                  />
 
                   {/* Interior Light */}
-                  <rect x="105" y="35" width="150" height="250" fill="#080808" />
-                  <rect x="145" y="35" width="110" height="250" fill="url(#doorSpill)" />
+                  <rect
+                    x="105"
+                    y="35"
+                    width="150"
+                    height="250"
+                    fill="#080808"
+                  />
+                  <rect
+                    x="145"
+                    y="35"
+                    width="110"
+                    height="250"
+                    fill="url(#doorSpill)"
+                  />
 
                   {/* The Detective Silhouette */}
                   <g className="detective">
                     {/* Fedora */}
                     <path d="M165 88 L195 88 L198 94 L162 94 Z" fill="#000" />
-                    <path d="M172 78 Q180 74 188 78 L190 88 L170 88 Z" fill="#000" />
+                    <path
+                      d="M172 78 Q180 74 188 78 L190 88 L170 88 Z"
+                      fill="#000"
+                    />
 
                     {/* Head */}
                     <circle cx="180" cy="102" r="9" fill="#000" />
 
                     {/* Trench Coat */}
-                    <path d="M158 120 Q180 112 202 120 L215 285 L145 285 Z" fill="#000" />
+                    <path
+                      d="M158 120 Q180 112 202 120 L215 285 L145 285 Z"
+                      fill="#000"
+                    />
 
                     {/* Arms */}
-                    <path d="M158 120 L145 200 L155 205 L165 125 Z" fill="#000" />
-                    <path d="M202 120 L215 200 L205 205 L195 125 Z" fill="#000" />
+                    <path
+                      d="M158 120 L145 200 L155 205 L165 125 Z"
+                      fill="#000"
+                    />
+                    <path
+                      d="M202 120 L215 200 L205 205 L195 125 Z"
+                      fill="#000"
+                    />
 
                     {/* Shadow */}
-                    <ellipse cx="180" cy="285" rx="45" ry="6" fill="#000" opacity="0.8" />
+                    <ellipse
+                      cx="180"
+                      cy="285"
+                      rx="45"
+                      ry="6"
+                      fill="#000"
+                      opacity="0.8"
+                    />
                   </g>
 
                   {/* Dust Motes (Animated in CSS/Framer) */}
-                  <circle cx="140" cy="120" r="0.6" fill="#f59e0b" opacity="0.3" />
-                  <circle cx="220" cy="160" r="0.4" fill="#f59e0b" opacity="0.5" />
-                  <circle cx="170" cy="200" r="0.8" fill="#f59e0b" opacity="0.2" />
+                  <circle
+                    cx="140"
+                    cy="120"
+                    r="0.6"
+                    fill="#f59e0b"
+                    opacity="0.3"
+                  />
+                  <circle
+                    cx="220"
+                    cy="160"
+                    r="0.4"
+                    fill="#f59e0b"
+                    opacity="0.5"
+                  />
+                  <circle
+                    cx="170"
+                    cy="200"
+                    r="0.8"
+                    fill="#f59e0b"
+                    opacity="0.2"
+                  />
                 </motion.svg>
               </div>
 
@@ -2037,10 +2220,13 @@ export default function App() {
                   <h2 className="font-display text-[clamp(28px,8vw,42px)] text-ink leading-[0.9] mb-6 uppercase tracking-tight">
                     Someone was here.
                     <br />
-                    <span className="text-red-noir italic">Now they're not.</span>
+                    <span className="text-red-noir italic">
+                      Now they're not.
+                    </span>
                   </h2>
                   <p className="font-serif text-[clamp(16px,4.5vw,18px)] font-light text-ink2 leading-relaxed italic max-w-md mx-auto">
-                    "The room remembers what the eyes forget. Point your lens at the truth and find what they're hiding."
+                    "The room remembers what the eyes forget. Point your lens at
+                    the truth and find what they're hiding."
                   </p>
                 </div>
 
@@ -2251,184 +2437,192 @@ export default function App() {
 
               <div className="bg-bg">
                 <div className="max-w-6xl mx-auto px-6 sm:px-8 lg:px-12 py-10 pb-48 space-y-12">
-                {/* Opening Statement */}
-                <section>
-                  <div className="flex items-center gap-4 mb-6">
-                    <div className="h-px flex-1 bg-border" />
-                    <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
-                      Initial Contact
+                  {/* Opening Statement */}
+                  <section>
+                    <div className="flex items-center gap-4 mb-6">
+                      <div className="h-px flex-1 bg-border" />
+                      <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
+                        Initial Contact
+                      </div>
+                      <div className="h-px w-8 bg-border" />
                     </div>
-                    <div className="h-px w-8 bg-border" />
-                  </div>
-                  <p className="font-serif text-[clamp(18px,5vw,22px)] font-light italic text-ink leading-relaxed text-center px-4">
-                    "{typedOpeningStatement}"
-                    {isWitnessTyping && (
-                      <span className="inline-block ml-1 w-[0.55ch] h-[1em] align-[-0.1em] bg-red-noir/60 animate-pulse" />
-                    )}
-                  </p>
-                </section>
+                    <p className="font-serif text-[clamp(18px,5vw,22px)] font-light italic text-ink leading-relaxed text-center px-4">
+                      "{typedOpeningStatement}"
+                      {isWitnessTyping && (
+                        <span className="inline-block ml-1 w-[0.55ch] h-[1em] align-[-0.1em] bg-red-noir/60 animate-pulse" />
+                      )}
+                    </p>
+                  </section>
 
-                {/* Narrative & Details Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
-                  <div className="md:col-span-2 space-y-10">
-                    <section>
-                      <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
-                        Crime Scene Narrative
-                      </div>
-                      <div className="bg-bg2 p-6 border-l-2 border-red-noir/30">
-                        <p className="font-serif text-[15px] text-ink2 leading-relaxed italic">
-                          "{persona.crimeSceneNarrative ||
-                            witnessQuote ||
-                            persona.openingStatement}"
-                        </p>
-                      </div>
-                    </section>
+                  {/* Narrative & Details Grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
+                    <div className="md:col-span-2 space-y-10">
+                      <section>
+                        <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
+                          Crime Scene Narrative
+                        </div>
+                        <div className="bg-bg2 p-6 border-l-2 border-red-noir/30">
+                          <p className="font-serif text-[15px] text-ink2 leading-relaxed italic">
+                            "
+                            {persona.crimeSceneNarrative ||
+                              witnessQuote ||
+                              persona.openingStatement}
+                            "
+                          </p>
+                        </div>
+                      </section>
 
-                    {/* Evidence Links */}
-                    <section>
-                      <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-6 flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
-                        Evidence Connections
-                      </div>
-                      {persona.objectConnections &&
-                      persona.objectConnections.length > 0 ? (
-                        <div className="grid grid-cols-1 gap-4">
-                          {persona.objectConnections.map((conn, i) => (
-                            <div
-                              key={`${conn.object}-${i}`}
-                              className="group flex items-start gap-4 p-4 bg-bg border border-border hover:border-red-noir/30 transition-colors"
-                            >
-                              <div className="w-8 h-8 rounded-full bg-bg2 border border-border flex items-center justify-center font-mono text-[10px] text-ink4 group-hover:text-red-noir transition-colors">
-                                0{i + 1}
-                              </div>
-                              <div className="flex-1">
-                                <span className="font-display text-[11px] text-ink tracking-[2px] uppercase block mb-1">
-                                  {conn.object}
-                                </span>
-                                <p className="font-serif text-[13px] text-ink3 leading-snug">
-                                  {conn.significance}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
+                      {/* Evidence Links */}
+                      <section>
+                        <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-6 flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
+                          Evidence Connections
                         </div>
-                      ) : detections.length === 0 ? (
-                        <div className="border border-border bg-bg2 p-4 text-sm text-ink3 italic">
-                          No evidence logged yet. Return to the scene and scan the room.
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 gap-4">
-                          {detections.map((obj, i) => {
-                            const isActive = activeEvidence === obj.label;
-                            return (
-                              <button
-                                key={`${obj.label}-${i}`}
-                                onClick={() => setActiveEvidence(obj.label)}
-                                className={`group text-left flex items-start gap-4 p-4 border transition-colors ${
-                                  isActive
-                                    ? 'border-red-noir bg-red-noir/10'
-                                    : 'border-border bg-bg hover:border-red-noir/30'
-                                }`}
+                        {persona.objectConnections &&
+                        persona.objectConnections.length > 0 ? (
+                          <div className="grid grid-cols-1 gap-4">
+                            {persona.objectConnections.map((conn, i) => (
+                              <div
+                                key={`${conn.object}-${i}`}
+                                className="group flex items-start gap-4 p-4 bg-bg border border-border hover:border-red-noir/30 transition-colors"
                               >
                                 <div className="w-8 h-8 rounded-full bg-bg2 border border-border flex items-center justify-center font-mono text-[10px] text-ink4 group-hover:text-red-noir transition-colors">
                                   0{i + 1}
                                 </div>
                                 <div className="flex-1">
                                   <span className="font-display text-[11px] text-ink tracking-[2px] uppercase block mb-1">
-                                    {obj.label}
+                                    {conn.object}
                                   </span>
                                   <p className="font-serif text-[13px] text-ink3 leading-snug">
-                                    {obj.description}
+                                    {conn.significance}
                                   </p>
                                 </div>
-                              </button>
-                            );
-                          })}
+                              </div>
+                            ))}
+                          </div>
+                        ) : detections.length === 0 ? (
+                          <div className="border border-border bg-bg2 p-4 text-sm text-ink3 italic">
+                            No evidence logged yet. Return to the scene and scan
+                            the room.
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 gap-4">
+                            {detections.map((obj, i) => {
+                              const isActive = activeEvidence === obj.label;
+                              return (
+                                <button
+                                  key={`${obj.label}-${i}`}
+                                  onClick={() => setActiveEvidence(obj.label)}
+                                  className={`group text-left flex items-start gap-4 p-4 border transition-colors ${
+                                    isActive
+                                      ? 'border-red-noir bg-red-noir/10'
+                                      : 'border-border bg-bg hover:border-red-noir/30'
+                                  }`}
+                                >
+                                  <div className="w-8 h-8 rounded-full bg-bg2 border border-border flex items-center justify-center font-mono text-[10px] text-ink4 group-hover:text-red-noir transition-colors">
+                                    0{i + 1}
+                                  </div>
+                                  <div className="flex-1">
+                                    <span className="font-display text-[11px] text-ink tracking-[2px] uppercase block mb-1">
+                                      {obj.label}
+                                    </span>
+                                    <p className="font-serif text-[13px] text-ink3 leading-snug">
+                                      {obj.description}
+                                    </p>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </section>
+                    </div>
+
+                    {/* Sidebar Stats */}
+                    <aside className="space-y-8">
+                      <div className="border border-border divide-y divide-border bg-bg2">
+                        <div className="p-5">
+                          <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
+                            Age
+                          </div>
+                          <div className="font-serif text-lg text-ink">
+                            {persona.age}
+                          </div>
                         </div>
-                      )}
-                    </section>
+                        <div className="p-5">
+                          <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
+                            Occupation
+                          </div>
+                          <div className="font-serif text-lg text-ink leading-tight">
+                            {persona.occupation}
+                          </div>
+                        </div>
+                        <div className="p-5">
+                          <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
+                            Nervous Tells
+                          </div>
+                          <div className="space-y-2 mt-2">
+                            {persona.tells.map((tell, i) => (
+                              <div key={i} className="flex items-center gap-2">
+                                <div className="w-1 h-1 rounded-full bg-red-noir/40" />
+                                <span className="font-serif text-sm text-ink2">
+                                  {tell}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button
+                          onClick={() => setInterrogationMode('text')}
+                          className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
+                            interrogationMode === 'text'
+                              ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                              : 'border-border text-ink3 hover:border-red-noir/50'
+                          }`}
+                        >
+                          Interrogate With Text
+                        </button>
+                        <button
+                          onClick={() => setInterrogationMode('voice')}
+                          className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
+                            interrogationMode === 'voice'
+                              ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                              : 'border-border text-ink3 hover:border-red-noir/50'
+                          }`}
+                        >
+                          Interrogate With Voice
+                        </button>
+                      </div>
+
+                      <AnimatePresence>
+                        {!isWitnessTyping &&
+                          typedOpeningStatement.length > 0 && (
+                            <motion.button
+                              initial={{ opacity: 0, y: 12, scale: 0.985 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, y: 8 }}
+                              transition={{ duration: 0.35, ease: 'easeOut' }}
+                              onClick={beginInterrogation}
+                              className="group relative w-full font-display text-[10px] tracking-[5px] text-white uppercase bg-red-noir py-6 shadow-xl active:scale-95 transition-all overflow-hidden"
+                            >
+                              <span className="relative z-10">
+                                {interrogationMode === 'voice'
+                                  ? 'BEGIN VOICE INTERROGATION'
+                                  : 'BEGIN TEXT INTERROGATION'}
+                              </span>
+                              <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                            </motion.button>
+                          )}
+                      </AnimatePresence>
+                    </aside>
                   </div>
 
-                  {/* Sidebar Stats */}
-                  <aside className="space-y-8">
-                    <div className="border border-border divide-y divide-border bg-bg2">
-                      <div className="p-5">
-                        <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
-                          Age
-                        </div>
-                        <div className="font-serif text-lg text-ink">{persona.age}</div>
-                      </div>
-                      <div className="p-5">
-                        <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
-                          Occupation
-                        </div>
-                        <div className="font-serif text-lg text-ink leading-tight">
-                          {persona.occupation}
-                        </div>
-                      </div>
-                      <div className="p-5">
-                        <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
-                          Nervous Tells
-                        </div>
-                        <div className="space-y-2 mt-2">
-                          {persona.tells.map((tell, i) => (
-                            <div key={i} className="flex items-center gap-2">
-                              <div className="w-1 h-1 rounded-full bg-red-noir/40" />
-                              <span className="font-serif text-sm text-ink2">{tell}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <button
-                        onClick={() => setInterrogationMode('text')}
-                        className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
-                          interrogationMode === 'text'
-                            ? 'border-red-noir bg-red-noir/10 text-red-noir'
-                            : 'border-border text-ink3 hover:border-red-noir/50'
-                        }`}
-                      >
-                        Interrogate With Text
-                      </button>
-                      <button
-                        onClick={() => setInterrogationMode('voice')}
-                        className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
-                          interrogationMode === 'voice'
-                            ? 'border-red-noir bg-red-noir/10 text-red-noir'
-                            : 'border-border text-ink3 hover:border-red-noir/50'
-                        }`}
-                      >
-                        Interrogate With Voice
-                      </button>
-                    </div>
-
-                    <AnimatePresence>
-                      {!isWitnessTyping && typedOpeningStatement.length > 0 && (
-                        <motion.button
-                          initial={{ opacity: 0, y: 12, scale: 0.985 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={{ opacity: 0, y: 8 }}
-                          transition={{ duration: 0.35, ease: 'easeOut' }}
-                          onClick={beginInterrogation}
-                          className="group relative w-full font-display text-[10px] tracking-[5px] text-white uppercase bg-red-noir py-6 shadow-xl active:scale-95 transition-all overflow-hidden"
-                        >
-                          <span className="relative z-10">
-                            {interrogationMode === 'voice'
-                              ? 'BEGIN VOICE INTERROGATION'
-                              : 'BEGIN TEXT INTERROGATION'}
-                          </span>
-                          <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
-                        </motion.button>
-                      )}
-                    </AnimatePresence>
-                  </aside>
-                </div>
-
-                {/* Footer Spacer */}
-                <div className="h-12" />
+                  {/* Footer Spacer */}
+                  <div className="h-12" />
                 </div>
               </div>
             </div>
@@ -2535,21 +2729,19 @@ export default function App() {
                 </motion.div>
               ))}
               {isInterrogating &&
-                !messages.some(
-                  m => m.role === 'witness' && m.isStreaming
-                ) && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="self-start max-w-[85%]"
-                >
-                  <div className="bg-surface border border-border p-4 flex gap-1">
-                    <div className="w-1.5 h-1.5 rounded-full bg-ink4 animate-bounce" />
-                    <div className="w-1.5 h-1.5 rounded-full bg-ink4 animate-bounce [animation-delay:0.2s]" />
-                    <div className="w-1.5 h-1.5 rounded-full bg-ink4 animate-bounce [animation-delay:0.4s]" />
-                  </div>
-                </motion.div>
-              )}
+                !messages.some(m => m.role === 'witness' && m.isStreaming) && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="self-start max-w-[85%]"
+                  >
+                    <div className="bg-surface border border-border p-4 flex gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-ink4 animate-bounce" />
+                      <div className="w-1.5 h-1.5 rounded-full bg-ink4 animate-bounce [animation-delay:0.2s]" />
+                      <div className="w-1.5 h-1.5 rounded-full bg-ink4 animate-bounce [animation-delay:0.4s]" />
+                    </div>
+                  </motion.div>
+                )}
               <div ref={chatEndRef} />
             </div>
 
@@ -3247,10 +3439,7 @@ export default function App() {
             className="fixed inset-0 z-10 flex flex-col bg-bg"
           >
             <div className="flex-1 relative overflow-hidden bg-bg2">
-              <div
-                ref={cameraFrameRef}
-                className="absolute inset-0"
-              >
+              <div ref={cameraFrameRef} className="absolute inset-0">
                 <div
                   className="absolute"
                   style={
@@ -3367,6 +3556,25 @@ export default function App() {
               )}
 
               {/* Camera Denied */}
+              {cameraStatus === 'idle' && (
+                <div className="absolute inset-0 z-35 flex flex-col items-center justify-center gap-4 px-12 text-center bg-bg/95">
+                  <Camera className="w-12 h-12 text-ink3" />
+                  <h3 className="font-display text-base tracking-[3px] text-ink uppercase">
+                    ENABLE CAMERA TO BEGIN
+                  </h3>
+                  <p className="font-serif text-sm italic text-ink3 leading-relaxed max-w-lg">
+                    Tap the button below and allow camera permission to scan the
+                    room and generate your witness.
+                  </p>
+                  <button
+                    onClick={startCamera}
+                    className="mt-2 font-display text-xs tracking-[3px] text-ink border border-border px-8 py-3 active:bg-surface2 transition-all"
+                  >
+                    ENABLE CAMERA
+                  </button>
+                </div>
+              )}
+
               {cameraStatus === 'denied' && (
                 <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 px-12 text-center bg-bg">
                   <Camera className="w-12 h-12 text-ink3" />
@@ -3374,8 +3582,8 @@ export default function App() {
                     CAMERA ACCESS DENIED
                   </h3>
                   <p className="font-serif text-sm italic text-ink3 leading-relaxed">
-                    Enable camera access in your browser settings, then reload
-                    the page to begin your investigation.
+                    {cameraIssue ??
+                      'Enable camera access in your browser settings, then reload the page to begin your investigation.'}
                   </p>
                   <button
                     onClick={startCamera}
@@ -3383,6 +3591,19 @@ export default function App() {
                   >
                     TRY AGAIN
                   </button>
+                </div>
+              )}
+
+              {cameraStatus === 'unsupported' && (
+                <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 px-12 text-center bg-bg">
+                  <AlertCircle className="w-12 h-12 text-ink3" />
+                  <h3 className="font-display text-base tracking-[3px] text-ink uppercase">
+                    CAMERA NOT AVAILABLE
+                  </h3>
+                  <p className="font-serif text-sm italic text-ink3 leading-relaxed max-w-lg">
+                    {cameraIssue ??
+                      'This browser or context does not allow camera access. Open the app in a modern browser over HTTPS.'}
+                  </p>
                 </div>
               )}
             </div>
@@ -3430,7 +3651,7 @@ export default function App() {
                   </span>
                 </div>
                 <button
-                  onClick={captureScene}
+                  onClick={cameraStatus === 'live' ? captureScene : startCamera}
                   className={`w-16 h-16 rounded-full border-4 border-ink2 flex items-center justify-center transition-all active:scale-90 relative ${isScanning ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                 >
                   <div
@@ -3451,6 +3672,21 @@ export default function App() {
                     className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
                   >
                     MEET THE WITNESS →
+                  </button>
+                </motion.div>
+              )}
+
+              {caseFile && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-3"
+                >
+                  <button
+                    onClick={() => navigateToScreen('casefile')}
+                    className="w-full font-mono text-[10px] tracking-[3px] text-ink border border-border py-3 active:bg-surface2 transition-all uppercase"
+                  >
+                    OPEN CASE FILE
                   </button>
                 </motion.div>
               )}
