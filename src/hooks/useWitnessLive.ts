@@ -117,8 +117,14 @@ function chooseFinalTranscript(previous: string, incoming: string): string {
   return incoming;
 }
 
-function containsDevanagari(text: string): boolean {
-  return /[\u0900-\u097F]/.test(text);
+function isLikelyEnglishText(text: string): boolean {
+  const normalized = text.normalize('NFKC').trim();
+  if (!normalized) return false;
+  const letters = normalized.match(/\p{L}/gu) ?? [];
+  // Numbers/punctuation-only snippets are allowed.
+  if (letters.length === 0) return true;
+  const latinLetters = normalized.match(/\p{Script=Latin}/gu) ?? [];
+  return latinLetters.length / letters.length >= 0.85;
 }
 
 const META_PHRASES = [
@@ -616,108 +622,110 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             if (hasBtOutput) echoGuardEnabledRef.current = true;
           })
           .catch(() => {});
-          // Use the browser's native sample rate; toPcm16k downsamples to 16kHz.
-          const ctx = new AudioContext({ latencyHint: 'interactive' });
-          audioContextRef.current = ctx;
-          if (ctx.state === 'suspended') ctx.resume();
-          const source = ctx.createMediaStreamSource(stream);
-          // 4096-frame buffer gives stable 85ms callback intervals at 48kHz.
-          const bufferSize = 4096;
-          const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
-          processorRef.current = processor;
-          let buffer: number[] = [];
-          const sr = ctx.sampleRate;
-          const samplesPerChunk = Math.floor(
-            (SAMPLE_RATE_TARGET / 1000) * CHUNK_MS
-          );
-          // Number of source samples per output chunk
-          const srcSamplesPerChunk = Math.floor(
-            (sr / SAMPLE_RATE_TARGET) * samplesPerChunk
-          );
+        // Use the browser's native sample rate; toPcm16k downsamples to 16kHz.
+        const ctx = new AudioContext({ latencyHint: 'interactive' });
+        audioContextRef.current = ctx;
+        if (ctx.state === 'suspended') ctx.resume();
+        const source = ctx.createMediaStreamSource(stream);
+        // 4096-frame buffer gives stable 85ms callback intervals at 48kHz.
+        const bufferSize = 4096;
+        const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
+        processorRef.current = processor;
+        let buffer: number[] = [];
+        const sr = ctx.sampleRate;
+        const samplesPerChunk = Math.floor(
+          (SAMPLE_RATE_TARGET / 1000) * CHUNK_MS
+        );
+        // Number of source samples per output chunk
+        const srcSamplesPerChunk = Math.floor(
+          (sr / SAMPLE_RATE_TARGET) * samplesPerChunk
+        );
 
-          processor.onaudioprocess = e => {
-            const input = e.inputBuffer.getChannelData(0);
+        processor.onaudioprocess = e => {
+          const input = e.inputBuffer.getChannelData(0);
 
-            // Local barge-in amplitude tracking (even when ENABLE_LOCAL_BARGE_IN=false)
-            let maxAbs = 0;
-            let sumSq = 0;
-            for (let i = 0; i < input.length; i++) {
-              const v = Math.abs(input[i]!);
-              if (v > maxAbs) maxAbs = v;
-              sumSq += v * v;
-            }
-            const rms = input.length ? Math.sqrt(sumSq / input.length) : 0;
-            const now = Date.now();
-            // Freeze noise-floor adaptation during witness speech AND during the echo-fade
-            // window that immediately follows turn_complete. This prevents echo tail from
-            // inflating the noise floor and confusing the VAD.
-            const inEchoFade = now < echoFadeUntilRef.current;
-            if (statusRef.current !== 'witness_speaking' && !inEchoFade) {
-              const next = noiseFloorRef.current * 0.9 + rms * 0.1;
-              noiseFloorRef.current = Math.max(0.003, next);
-            }
-            const adaptive = Math.max(
-              BARGE_IN_BASE_RMS,
-              noiseFloorRef.current * BARGE_IN_NOISE_MULT
+          // Local barge-in amplitude tracking (even when ENABLE_LOCAL_BARGE_IN=false)
+          let maxAbs = 0;
+          let sumSq = 0;
+          for (let i = 0; i < input.length; i++) {
+            const v = Math.abs(input[i]!);
+            if (v > maxAbs) maxAbs = v;
+            sumSq += v * v;
+          }
+          const rms = input.length ? Math.sqrt(sumSq / input.length) : 0;
+          const now = Date.now();
+          // Freeze noise-floor adaptation during witness speech AND during the echo-fade
+          // window that immediately follows turn_complete. This prevents echo tail from
+          // inflating the noise floor and confusing the VAD.
+          const inEchoFade = now < echoFadeUntilRef.current;
+          if (statusRef.current !== 'witness_speaking' && !inEchoFade) {
+            const next = noiseFloorRef.current * 0.9 + rms * 0.1;
+            noiseFloorRef.current = Math.max(0.003, next);
+          }
+          const adaptive = Math.max(
+            BARGE_IN_BASE_RMS,
+            noiseFloorRef.current * BARGE_IN_NOISE_MULT
+          );
+          const aboveBargeThreshold =
+            statusRef.current === 'witness_speaking' &&
+            rms > adaptive &&
+            maxAbs > adaptive * BARGE_IN_PEAK_MULT;
+
+          if (aboveBargeThreshold) {
+            localBargeActiveFramesRef.current += 1;
+          } else {
+            localBargeActiveFramesRef.current = 0;
+          }
+
+          if (
+            ENABLE_LOCAL_BARGE_IN &&
+            aboveBargeThreshold &&
+            localBargeActiveFramesRef.current >= BARGE_IN_REQUIRED_FRAMES &&
+            now - lastLocalInterruptMsRef.current > BARGE_IN_COOLDOWN_MS
+          ) {
+            lastLocalInterruptMsRef.current = now;
+            localBargeActiveFramesRef.current = 0;
+            onInterrupted?.();
+            setStatusSafe('listening');
+          }
+
+          // Always accumulate mic samples into buffer.
+          for (let i = 0; i < input.length; i++) buffer.push(input[i]!);
+
+          // Flush complete chunks
+          while (buffer.length >= srcSamplesPerChunk) {
+            const chunk = new Float32Array(
+              buffer.splice(0, srcSamplesPerChunk)
             );
-            const aboveBargeThreshold =
-              statusRef.current === 'witness_speaking' &&
-              rms > adaptive &&
-              maxAbs > adaptive * BARGE_IN_PEAK_MULT;
-
-            if (aboveBargeThreshold) {
-              localBargeActiveFramesRef.current += 1;
-            } else {
-              localBargeActiveFramesRef.current = 0;
-            }
-
-            if (
-              ENABLE_LOCAL_BARGE_IN &&
-              aboveBargeThreshold &&
-              localBargeActiveFramesRef.current >= BARGE_IN_REQUIRED_FRAMES &&
-              now - lastLocalInterruptMsRef.current > BARGE_IN_COOLDOWN_MS
-            ) {
-              lastLocalInterruptMsRef.current = now;
-              localBargeActiveFramesRef.current = 0;
-              onInterrupted?.();
-              setStatusSafe('listening');
-            }
-
-            // Always accumulate mic samples into buffer.
-            for (let i = 0; i < input.length; i++) buffer.push(input[i]!);
-
-            // Flush complete chunks
-            while (buffer.length >= srcSamplesPerChunk) {
-              const chunk = new Float32Array(
-                buffer.splice(0, srcSamplesPerChunk)
-              );
-              const pcm = toPcm16k(chunk, sr);
-              const echoGuardActive =
-                echoGuardEnabledRef.current &&
-                statusRef.current === 'witness_speaking';
-              if (echoGuardActive) {
-                preRollChunksRef.current.push(pcm);
-                if (preRollChunksRef.current.length > ECHO_GUARD_PRE_ROLL_CHUNKS) {
-                  preRollChunksRef.current.shift();
-                }
-              } else {
-                if (preRollChunksRef.current.length) {
-                  for (const queued of preRollChunksRef.current) {
-                    sendAudioBinary(queued);
-                  }
-                  preRollChunksRef.current = [];
-                }
-                sendAudioBinary(pcm);
+            const pcm = toPcm16k(chunk, sr);
+            const echoGuardActive =
+              echoGuardEnabledRef.current &&
+              statusRef.current === 'witness_speaking';
+            if (echoGuardActive) {
+              preRollChunksRef.current.push(pcm);
+              if (
+                preRollChunksRef.current.length > ECHO_GUARD_PRE_ROLL_CHUNKS
+              ) {
+                preRollChunksRef.current.shift();
               }
+            } else {
+              if (preRollChunksRef.current.length) {
+                for (const queued of preRollChunksRef.current) {
+                  sendAudioBinary(queued);
+                }
+                preRollChunksRef.current = [];
+              }
+              sendAudioBinary(pcm);
             }
-          };
-          source.connect(processor);
-          // Prevent mic monitor/loopback: route processor to a silent gain node.
-          const silence = ctx.createGain();
-          silence.gain.value = 0;
-          processor.connect(silence);
-          silence.connect(ctx.destination);
+          }
         };
+        source.connect(processor);
+        // Prevent mic monitor/loopback: route processor to a silent gain node.
+        const silence = ctx.createGain();
+        silence.gain.value = 0;
+        processor.connect(silence);
+        silence.connect(ctx.destination);
+      };
 
       navigator.mediaDevices
         .getUserMedia(buildConstraints())
@@ -890,7 +898,10 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
           };
 
           const userText = getTranscript(inputTrans);
-          if (userText && !containsDevanagari(userText)) {
+          const userHasEnglishText = Boolean(
+            userText && isLikelyEnglishText(userText)
+          );
+          if (userHasEnglishText) {
             if (userTranscriptClosedRef.current) {
               // Input and output transcriptions can arrive out of order. Once the witness
               // has started responding, ignore late user ASR finals to avoid duplicate bubbles.
@@ -909,7 +920,10 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
           }
 
           const witnessText = getTranscript(outputTrans);
-          if (witnessText) {
+          const witnessHasEnglishText = Boolean(
+            witnessText && isLikelyEnglishText(witnessText)
+          );
+          if (witnessHasEnglishText) {
             hasOutputTranscriptionInTurnRef.current = true;
             userTranscriptClosedRef.current = true;
             setStatusSafe('witness_speaking');
@@ -928,7 +942,9 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             }
           }
 
-          const hasTranscriptText = Boolean(userText || witnessText);
+          const hasTranscriptText = Boolean(
+            userHasEnglishText || witnessHasEnglishText
+          );
 
           if (content?.parts) {
             const textParts = content.parts
@@ -947,12 +963,14 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
 
             if (isPartialEvent && !hasTranscriptText && textPayload) {
               const role = eventAuthor === 'user' ? 'user' : 'witness';
+              const isEnglishPayload = isLikelyEnglishText(textPayload);
               if (
                 role === 'user' &&
-                (userTranscriptClosedRef.current ||
-                  containsDevanagari(textPayload))
+                (userTranscriptClosedRef.current || !isEnglishPayload)
               ) {
                 // Ignore late or obviously wrong-language user partials.
+              } else if (!isEnglishPayload) {
+                // Ignore non-English witness partials.
               } else {
                 const mergedText = mergeStreamedText(role, textPayload);
 

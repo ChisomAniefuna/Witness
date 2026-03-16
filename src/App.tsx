@@ -991,7 +991,8 @@ export default function App() {
           '"I was here when it happened. I heard everything. I saw him leave. At least… I think that\'s what I saw."',
         guiltyOf: 'Accidental Manslaughter',
         secret: 'He was sleeping on the job when the crime occurred.',
-        method:'killed the person with knife he brought,then threw him from the balcony to make it seem like an accident'
+        method:
+          'killed the person with knife he brought,then threw him from the balcony to make it seem like an accident',
       };
       queueOrCommitWitnessPersona(fallback);
     } finally {
@@ -1140,7 +1141,7 @@ export default function App() {
           witness: persona.name,
           objects: detections.map(d => d.label),
           guiltyOf: persona.guiltyOf,
-          method:persona.method
+          method: persona.method,
         }
       );
       setVerdict(res);
@@ -2373,19 +2374,10 @@ export default function App() {
             else if (currentScreen === 'camera') navigateToScreen('onboarding');
             else navigateToScreen('camera');
           }}
-          className={`fixed top-4 left-6 z-[60] flex items-center justify-center gap-2 bg-bg/85 border border-border backdrop-blur-md active:bg-surface2 transition-all ${
-            ['witness', 'interrogation'].includes(currentScreen)
-              ? 'w-11 h-11'
-              : 'px-3 py-2'
-          }`}
+          className="fixed top-[max(12px,env(safe-area-inset-top))] left-3 md:left-6 z-[60] w-11 h-11 flex items-center justify-center bg-bg/85 border border-border backdrop-blur-md active:bg-surface2 transition-all"
           aria-label="Go back"
         >
           <ChevronLeft className="w-3 h-3 text-ink2" />
-          {!['witness', 'interrogation'].includes(currentScreen) && (
-            <span className="font-mono text-[8px] tracking-[3px] text-ink3 uppercase">
-              Back
-            </span>
-          )}
         </button>
       )}
 
