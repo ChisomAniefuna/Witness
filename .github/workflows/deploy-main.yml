@@ -37,11 +37,34 @@ jobs:
       - name: Configure Docker auth for gcloud builds
         run: gcloud auth configure-docker --quiet
 
+      - name: Build + push Node backend image
+        run: |
+          docker build -t "gcr.io/$PROJECT_ID/witness-backend" .
+          docker push "gcr.io/$PROJECT_ID/witness-backend"
+
       - name: Deploy Node backend (Cloud Run)
-        run: gcloud builds submit --config=cloudbuild.yaml .
+        run: |
+          gcloud run deploy witness-backend \
+            --image "gcr.io/$PROJECT_ID/witness-backend" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --max-instances 2
+
+      - name: Build + push live backend image
+        run: |
+          docker build -t "gcr.io/$PROJECT_ID/witness-live" -f live/Dockerfile live
+          docker push "gcr.io/$PROJECT_ID/witness-live"
 
       - name: Deploy live backend (Cloud Run)
-        run: gcloud builds submit --config=cloudbuild-live.yaml .
+        run: |
+          gcloud run deploy witness-live \
+            --image "gcr.io/$PROJECT_ID/witness-live" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8081 \
+            --max-instances 2
 
       - name: Resolve deployed service URLs
         run: |
