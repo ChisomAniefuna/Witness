@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="1200" height="475" alt="Witness Banner" src="[https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6](https://cdn.discordapp.com/attachments/1480109940927365183/1482324347665256579/IMG_7197.png?ex=69b92ca0&is=69b7db20&hm=579980eda8576de1910a25793fcd699872b9fc8e5e63ce8705f39f32c00ec549)" />
+  <img width="1200" height="475" alt="Witness Banner" src="https://cdn.discordapp.com/attachments/1480109940927365183/1482324347665256579/IMG_7197.png?ex=69b92ca0&is=69b7db20&hm=579980eda8576de1910a25793fcd699872b9fc8e5e63ce8705f39f32c00ec549" />
 
   # Witness
 
