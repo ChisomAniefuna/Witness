@@ -20,7 +20,7 @@ from collections import defaultdict
 from dotenv import load_dotenv  # pyright: ignore[reportMissingImports]
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect  # pyright: ignore[reportMissingImports]
 from fastapi.middleware.cors import CORSMiddleware  # pyright: ignore[reportMissingImports]
-from fastapi.responses import FileResponse  # pyright: ignore[reportMissingImports]
+from fastapi.responses import FileResponse, Response  # pyright: ignore[reportMissingImports]
 from slowapi import Limiter, _rate_limit_exceeded_handler  # pyright: ignore[reportMissingImports]
 from slowapi.util import get_remote_address  # pyright: ignore[reportMissingImports]
 from slowapi.errors import RateLimitExceeded  # pyright: ignore[reportMissingImports]
@@ -52,7 +52,15 @@ session_service = InMemorySessionService()
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Witness Live", version="0.1.0")
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def rate_limit_exceeded_handler(request: Request, exc: Exception) -> Response:
+    if isinstance(exc, RateLimitExceeded):
+        return _rate_limit_exceeded_handler(request, exc)
+    raise exc
+
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Per-IP concurrent WebSocket connection count (protect key from abuse)
 ws_connections_per_ip: dict[str, int] = defaultdict(int)
@@ -70,6 +78,7 @@ app.add_middleware(
         "http://localhost:4173",
         "http://127.0.0.1:4173",
     ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -186,43 +195,61 @@ async def websocket_live(websocket: WebSocket):
     )
 
     async def upstream_task():
+        """Receives messages from WebSocket and forwards to LiveRequestQueue.
+        Audio is sent as raw binary frames (PCM 16kHz 16-bit LE) matching the bidi-demo reference.
+        Text commands (init_ack, text) are sent as JSON text frames."""
         audio_chunk_count = 0
         try:
             while True:
-                raw = await websocket.receive_text()
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                t = data.get("type")
-                if t == "audio":
-                    b64 = data.get("data")
-                    if b64:
-                        try:
-                            audio_bytes = base64.b64decode(b64)
-                            blob = types.Blob(
-                                mime_type="audio/pcm;rate=16000",
-                                data=audio_bytes,
-                            )
-                            live_request_queue.send_realtime(blob)
-                            audio_chunk_count += 1
-                            if audio_chunk_count <= 3 or audio_chunk_count % 50 == 0:
-                                logger.info("Audio received: chunk #%s, %s bytes", audio_chunk_count, len(audio_bytes))
-                        except Exception as e:
-                            logger.warning("Audio decode/send_realtime failed: %s", e)
-                elif t == "text":
-                    text = data.get("text", "")
-                    if text:
-                        content = types.Content(parts=[types.Part(text=text)])
-                        live_request_queue.send_content(content)
+                message = await websocket.receive()
+
+                # Binary frame → raw PCM audio (preferred path, matches bidi-demo)
+                if "bytes" in message:
+                    audio_bytes = message["bytes"]
+                    if audio_bytes:
+                        blob = types.Blob(
+                            mime_type="audio/pcm;rate=16000",
+                            data=audio_bytes,
+                        )
+                        live_request_queue.send_realtime(blob)
+                        audio_chunk_count += 1
+                        if audio_chunk_count <= 3 or audio_chunk_count % 50 == 0:
+                            logger.info("Audio received (binary): chunk #%s, %s bytes", audio_chunk_count, len(audio_bytes))
+
+                # Text frame → JSON command (text message or legacy base64 audio)
+                elif "text" in message:
+                    raw = message["text"]
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    t = data.get("type")
+                    if t == "text":
+                        text = data.get("text", "")
+                        if text:
+                            content = types.Content(parts=[types.Part(text=text)])
+                            live_request_queue.send_content(content)
+                    elif t == "audio":
+                        # Legacy fallback: base64-encoded audio in JSON
+                        b64 = data.get("data")
+                        if b64:
+                            try:
+                                audio_bytes = base64.b64decode(b64)
+                                blob = types.Blob(mime_type="audio/pcm;rate=16000", data=audio_bytes)
+                                live_request_queue.send_realtime(blob)
+                            except Exception as e:
+                                logger.warning("Legacy audio decode failed: %s", e)
         except WebSocketDisconnect:
             logger.debug("Client disconnected (upstream)")
+        except RuntimeError as e:
+            if "disconnect" in str(e).lower():
+                logger.debug("Client disconnected (upstream, RuntimeError): %s", e)
+            else:
+                logger.exception("Upstream task RuntimeError: %s", e)
         except asyncio.CancelledError:
-            # Normal during server shutdown / task cancellation.
             return
         except Exception as e:
             logger.exception("Upstream task error: %s", e)
-
     async def downstream_task():
         try:
             event_count = 0

@@ -286,14 +286,49 @@ app.post('/api/contradiction', async (req, res) => {
       messages: { role: 'user' | 'witness'; text: string }[];
     };
     const model = 'gemini-3-flash-preview';
-    const lastMessages = messages.slice(-6);
-    const prompt = `
-      Analyze the conversation history. Does the last witness statement contradict anything said earlier?
-      Return JSON: { "contradiction": boolean, "quote": string }
-      If true, provide the specific contradicting quote from the last message.
+    const witnessMessages = messages
+      .filter(
+        m => m.role === 'witness' && typeof m.text === 'string' && m.text.trim()
+      )
+      .map(m => m.text.trim());
 
-      History:
-      ${lastMessages.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n')}
+    if (witnessMessages.length < 2) {
+      return res.json({ contradiction: false, quote: '' });
+    }
+
+    const latestWitnessMessage = witnessMessages[witnessMessages.length - 1];
+    const priorWitnessMessages = witnessMessages.slice(-6, -1);
+    const prompt = `
+      You are a strict contradiction detector for a murder mystery interrogation.
+
+      Your task is to compare the LATEST witness statement against PRIOR witness statements only.
+
+      Count a contradiction ONLY if there is a direct factual conflict about a concrete detail, such as:
+      - location
+      - possession of an object
+      - whether they performed an action
+      - timeline/order of events
+      - who they saw or did not see
+
+      Do NOT mark a contradiction for any of these:
+      - paraphrasing or rewording
+      - added detail that does not negate the earlier claim
+      - nervous revision or self-correction that keeps the same core fact
+      - different tone, emphasis, or level of certainty
+      - vague evasiveness
+
+      If the latest statement is merely more specific than the earlier one, return false.
+      If the earlier statement was vague and the latest statement is clearer, return false.
+
+      Return JSON: { "contradiction": boolean, "quote": string }
+      If contradiction is true, quote must be the exact EARLIER witness sentence that conflicts most clearly.
+      If contradiction is false, quote must be an empty string.
+
+      PRIOR WITNESS STATEMENTS:
+      ${priorWitnessMessages.map(m => `- ${m}`).join('\n')}
+
+      LATEST WITNESS STATEMENT:
+      ${latestWitnessMessage}
     `;
 
     const response = await ai.models.generateContent({

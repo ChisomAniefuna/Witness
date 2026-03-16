@@ -41,6 +41,8 @@ type Screen =
   | 'accusation'
   | 'casefile';
 
+type InterrogationMode = 'text' | 'voice';
+
 interface DetectionObject {
   label: string;
   x: number;
@@ -54,6 +56,7 @@ interface DetectionObject {
 interface Message {
   role: 'witness' | 'user';
   text: string;
+  isStreaming?: boolean;
   isContradiction?: boolean;
   contradictionQuote?: string;
 }
@@ -72,10 +75,20 @@ interface Verdict {
 
 const STORAGE_KEY = 'witness_state_v1';
 
+const WITNESS_LOADING_RULES = [
+  'Lead with one clear question.',
+  'Lock the timeline first.',
+  'Use the evidence by name.',
+  'Recheck weak answers once.',
+];
+
+const WITNESS_RULE_SCROLL_MS = 7000;
+
 interface PersistedStateV1 {
   version: 1;
   savedAt: number;
   currentScreen: Screen;
+  interrogationMode?: InterrogationMode;
   detections: DetectionObject[];
   showProceed: boolean;
   persona: WitnessPersona | null;
@@ -91,6 +104,14 @@ interface PersistedStateV1 {
   selectedMethod: string | null;
   verdict: Verdict | null;
   timeline: string[];
+}
+
+function normalizeMessageText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function loadPersistedState(): PersistedStateV1 | null {
@@ -332,6 +353,9 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState<Screen>(() =>
     resolveInitialScreen(persistedState)
   );
+  const [interrogationMode, setInterrogationMode] = useState<InterrogationMode>(
+    () => persistedState?.interrogationMode ?? 'text'
+  );
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved ? saved === 'dark' : true;
@@ -353,6 +377,7 @@ export default function App() {
     () => persistedState?.persona ?? null
   );
   const [isGeneratingPersona, setIsGeneratingPersona] = useState(false);
+  const [isWitnessRuleScrollDone, setIsWitnessRuleScrollDone] = useState(false);
   const [contradictionCount, setContradictionCount] = useState(
     () => persistedState?.contradictionCount ?? 0
   );
@@ -407,14 +432,103 @@ export default function App() {
   const [detectiveName, setDetectiveName] = useState('');
   const [typedOpeningStatement, setTypedOpeningStatement] = useState('');
   const [isWitnessTyping, setIsWitnessTyping] = useState(false);
-
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const liveAudioPlayerRef = useRef(createLiveAudioPlayer());
   const liveKickoffPendingRef = useRef(false);
+  const forceNewLiveMessageRef = useRef(false);
+  const currentScreenRef = useRef<Screen>(currentScreen);
   const witnessTypeAudioCtxRef = useRef<AudioContext | null>(null);
+  const typedStatementForRef = useRef('');
+  const pendingPersonaRef = useRef<WitnessPersona | null>(null);
+
+  const commitWitnessPersona = (nextPersona: WitnessPersona) => {
+    setPersona(nextPersona);
+    setMessages([{ role: 'witness', text: nextPersona.openingStatement }]);
+    setLastMessageTime(Date.now());
+    setIsGeneratingPersona(false);
+    pendingPersonaRef.current = null;
+  };
+
+  const upsertLiveTranscript = (
+    role: 'user' | 'witness',
+    text: string,
+    isFinal = true
+  ) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    setLastMessageTime(Date.now());
+    setMessages(prev => {
+      const last = prev.at(-1);
+      let next = prev;
+      const forceNewMessage = forceNewLiveMessageRef.current;
+      const nextMessage: Message = {
+        role,
+        text: trimmed,
+        isStreaming: !isFinal,
+      };
+
+      if (last?.role === role && last.isStreaming) {
+        const lastText = last.text.trim();
+        const normalizedLast = normalizeMessageText(lastText);
+        const normalizedNext = normalizeMessageText(trimmed);
+        if (normalizedLast === normalizedNext) {
+          next = [
+            ...prev.slice(0, -1),
+            {
+              ...last,
+              text: trimmed.length >= lastText.length ? trimmed : lastText,
+              isStreaming: !isFinal,
+            },
+          ];
+        } else {
+          next = [...prev.slice(0, -1), { ...last, ...nextMessage }];
+        }
+        if (isFinal) {
+          forceNewLiveMessageRef.current = false;
+        }
+      } else if (forceNewMessage) {
+        next = [...prev, nextMessage];
+        forceNewLiveMessageRef.current = false;
+      } else if (last?.role === role) {
+        const lastText = last.text.trim();
+        if (normalizeMessageText(trimmed) === normalizeMessageText(lastText)) {
+          return prev;
+        }
+        if (
+          last.isStreaming ||
+          trimmed.startsWith(lastText) ||
+          lastText.startsWith(trimmed)
+        ) {
+          next = [...prev.slice(0, -1), { ...last, ...nextMessage }];
+        } else {
+          next = [...prev, nextMessage];
+        }
+      } else {
+        next = [...prev, nextMessage];
+      }
+
+      if (role === 'witness' && isFinal) {
+        const lastIdx = next.length - 1;
+        detectContradiction(next).then(r => {
+          if (!r.contradiction) return;
+          setContradictionCount(c => c + 1);
+          setMessages(m =>
+            m.map((msg, i) =>
+              i === lastIdx && msg.role === 'witness'
+                ? { ...msg, isContradiction: true, contradictionQuote: r.quote }
+                : msg
+            )
+          );
+        });
+      }
+
+      return next;
+    });
+  };
 
   const {
     connected: liveConnected,
@@ -424,42 +538,58 @@ export default function App() {
     stopLive,
     sendText: sendLiveText,
   } = useWitnessLive({
-    onUserTranscript: text =>
-      setMessages(prev => [...prev, { role: 'user', text }]),
-    onWitnessTranscript: text => {
-      setMessages(prev => {
-        const next = [...prev, { role: 'witness', text }];
-        const lastIdx = next.length - 1;
-        detectContradiction(next).then(r => {
-          if (r.contradiction) {
-            setContradictionCount(c => c + 1);
-            setMessages(m =>
-              m.map((msg, i) =>
-                i === lastIdx
-                  ? {
-                      ...msg,
-                      isContradiction: true,
-                      contradictionQuote: r.quote,
-                    }
-                  : msg
-              )
-            );
-          }
-        });
-        return next;
-      });
+    onUserTranscript: (text, isFinal) =>
+      upsertLiveTranscript('user', text, isFinal),
+    onWitnessTranscript: (text, isFinal) => {
+      // In some sessions turn_complete can be delayed/missed after interruption.
+      // Release on first non-final witness transcript so new audio is not stuck muted.
+      if (isFinal === false) {
+        liveAudioPlayerRef.current?.release();
+      }
+      upsertLiveTranscript('witness', text, isFinal);
     },
     onAudioChunk: (base64, mimeType) =>
       liveAudioPlayerRef.current?.playChunk(base64, mimeType),
-    onInterrupted: () => liveAudioPlayerRef.current?.stop(),
-    onTurnComplete: () => liveAudioPlayerRef.current?.flush(),
+    onInterrupted: () => {
+      // suppress() stops current audio AND drops stale old-turn chunks still arriving from server
+      liveAudioPlayerRef.current?.suppress();
+      forceNewLiveMessageRef.current = true;
+    },
+    onTurnComplete: () => {
+      // release() re-enables the player for the next turn, then flush the buffered tail
+      liveAudioPlayerRef.current?.release();
+      liveAudioPlayerRef.current?.flush();
+      forceNewLiveMessageRef.current = true;
+    },
     onReady: () => {
+      if (currentScreenRef.current !== 'interrogation') {
+        liveKickoffPendingRef.current = false;
+        liveAudioPlayerRef.current?.stop();
+        stopLive();
+        setIsInterrogating(false);
+        return;
+      }
       if (!liveKickoffPendingRef.current) return;
       liveKickoffPendingRef.current = false;
       // Send kickoff immediately so the witness starts speaking with minimal wait.
       window.setTimeout(() => sendLiveText('Begin interrogation.'), 100);
     },
   });
+
+  const stopVoiceInterrogation = () => {
+    liveKickoffPendingRef.current = false;
+    liveAudioPlayerRef.current?.stop();
+    stopLive();
+    setIsInterrogating(false);
+  };
+
+  const navigateToScreen = (nextScreen: Screen) => {
+    if (nextScreen !== 'interrogation') {
+      stopVoiceInterrogation();
+    }
+    currentScreenRef.current = nextScreen;
+    setCurrentScreen(nextScreen);
+  };
 
   const toggleTheme = () => {
     setIsDark(prev => !prev);
@@ -478,9 +608,43 @@ export default function App() {
   }, [currentScreen, isMuted]);
 
   useEffect(() => {
+    currentScreenRef.current = currentScreen;
+    if (currentScreen !== 'interrogation') {
+      stopVoiceInterrogation();
+    }
+  }, [currentScreen]);
+
+  const beginInterrogation = () => {
+    if (!persona) return;
+
+    currentScreenRef.current = 'interrogation';
+    setCurrentScreen('interrogation');
+
+    if (interrogationMode === 'voice') {
+      liveKickoffPendingRef.current = true;
+      forceNewLiveMessageRef.current = true;
+      startLive(
+        {
+          name: persona.name,
+          archetype: persona.archetype,
+          age: persona.age,
+          occupation: persona.occupation,
+          tells: persona.tells,
+          openingStatement: persona.openingStatement,
+          guiltyOf: persona.guiltyOf,
+          secret: persona.secret,
+        },
+        detections.map(d => d.label),
+        true
+      );
+    }
+  };
+
+  useEffect(() => {
     if (!persona?.openingStatement) {
       setTypedOpeningStatement('');
       setIsWitnessTyping(false);
+      typedStatementForRef.current = '';
       return;
     }
 
@@ -491,6 +655,12 @@ export default function App() {
     }
 
     const fullText = persona.openingStatement;
+    if (typedStatementForRef.current === fullText) {
+      setTypedOpeningStatement(fullText);
+      setIsWitnessTyping(false);
+      return;
+    }
+
     setTypedOpeningStatement('');
     setIsWitnessTyping(true);
 
@@ -581,6 +751,7 @@ export default function App() {
 
       if (index >= fullText.length) {
         window.clearInterval(interval);
+        typedStatementForRef.current = fullText;
         setIsWitnessTyping(false);
       }
     }, 42);
@@ -601,6 +772,7 @@ export default function App() {
       version: 1,
       savedAt: Date.now(),
       currentScreen,
+      interrogationMode,
       detections,
       showProceed,
       persona,
@@ -619,6 +791,7 @@ export default function App() {
     });
   }, [
     currentScreen,
+    interrogationMode,
     detections,
     showProceed,
     persona,
@@ -786,12 +959,19 @@ export default function App() {
 
   const handleMeetWitness = async () => {
     setIsGeneratingPersona(true);
+    setIsWitnessRuleScrollDone(false);
+    setPersona(null);
+    setMessages([]);
+    typedStatementForRef.current = '';
+    pendingPersonaRef.current = null;
     setCurrentScreen('witness');
     try {
       const p = await generateWitnessPersona(detections.map(d => d.label));
-      setPersona(p);
-      setMessages([{ role: 'witness', text: p.openingStatement }]);
-      setLastMessageTime(Date.now());
+      if (isWitnessRuleScrollDone) {
+        commitWitnessPersona(p);
+      } else {
+        pendingPersonaRef.current = p;
+      }
     } catch (err) {
       console.error('Persona generation error:', err);
       // Fallback persona
@@ -806,12 +986,29 @@ export default function App() {
         guiltyOf: 'Accidental Manslaughter',
         secret: 'He was sleeping on the job when the crime occurred.',
       };
-      setPersona(fallback);
-      setMessages([{ role: 'witness', text: fallback.openingStatement }]);
+      if (isWitnessRuleScrollDone) {
+        commitWitnessPersona(fallback);
+      } else {
+        pendingPersonaRef.current = fallback;
+      }
     } finally {
-      setIsGeneratingPersona(false);
+      // Loading exits only after both generation is done and rule-scroll is complete.
     }
   };
+
+  useEffect(() => {
+    if (!(currentScreen === 'witness' && isGeneratingPersona)) return;
+    const timer = window.setTimeout(() => {
+      setIsWitnessRuleScrollDone(true);
+    }, WITNESS_RULE_SCROLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [currentScreen, isGeneratingPersona]);
+
+  useEffect(() => {
+    if (!isWitnessRuleScrollDone) return;
+    if (!pendingPersonaRef.current) return;
+    commitWitnessPersona(pendingPersonaRef.current);
+  }, [isWitnessRuleScrollDone]);
 
   const sendMessage = async () => {
     if (!userInput.trim() || isInterrogating || !persona) return;
@@ -907,7 +1104,7 @@ export default function App() {
 
   const handleAccuse = async () => {
     if (!persona) return;
-    setCurrentScreen('accusation');
+    navigateToScreen('accusation');
     try {
       const options = await getAccusationOptions(
         detections.map(d => d.label),
@@ -927,7 +1124,7 @@ export default function App() {
     if (!selectedSuspect || !selectedMotive || !selectedMethod || !persona)
       return;
 
-    setCurrentScreen('casefile');
+    navigateToScreen('casefile');
     try {
       const res = await evaluateAccusation(
         {
@@ -1169,28 +1366,75 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-10 flex flex-col bg-bg items-center justify-center px-6"
+            className="fixed inset-0 z-10 bg-bg"
           >
-            <div className="w-full max-w-md border border-border bg-surface p-6 shadow-[0_18px_45px_rgba(0,0,0,0.5)]">
-              <div className="flex items-center justify-between mb-6">
-                <div className="space-y-2">
-                  <div className="h-3 w-24 bg-border/40 rounded animate-pulse" />
-                  <div className="h-6 w-40 bg-border/30 rounded animate-pulse" />
+            <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_20%_30%,rgba(155,35,24,0.16),transparent_45%),radial-gradient(circle_at_80%_70%,rgba(155,35,24,0.1),transparent_42%)]" />
+            <div className="relative z-10 h-full grid grid-cols-1 md:grid-cols-2">
+              <div className="hidden md:flex flex-col justify-end border-r border-border/40 px-10 pb-14 pt-20">
+                <div className="font-mono text-[10px] tracking-[6px] text-red-noir uppercase mb-4 animate-flicker">
+                  Witness Intake
                 </div>
-                <div className="w-10 h-10 rounded-full border border-red-noir/40 flex items-center justify-center">
-                  <div className="w-2 h-2 rounded-full bg-red-noir animate-pulse" />
+                <h2 className="font-display text-[clamp(48px,7.6vw,96px)] leading-[0.88] tracking-[0.16em] text-ink uppercase">
+                  Mission
+                  <br />
+                  Briefing
+                </h2>
+                <p className="mt-5 max-w-[24ch] font-serif text-[clamp(16px,1.7vw,22px)] italic leading-relaxed text-ink3">
+                  Interrogate smart. Pressure slowly. Break the story, not the
+                  witness.
+                </p>
+                <div className="mt-8 font-mono text-[9px] tracking-[4px] text-ink4 uppercase">
+                  Syncing witness memory core...
                 </div>
               </div>
-              <div className="h-20 w-full bg-border/20 rounded mb-4 animate-pulse" />
-              <div className="grid grid-cols-2 gap-3 mb-8">
-                <div className="h-14 bg-border/10 rounded animate-pulse" />
-                <div className="h-14 bg-border/10 rounded animate-pulse" />
-                <div className="col-span-2 h-14 bg-border/10 rounded animate-pulse" />
+
+              <div className="relative flex flex-col justify-center px-6 md:px-12 py-16 overflow-hidden">
+                <div className="absolute top-8 right-8 w-16 h-16 rounded-full border border-red-noir/30 flex items-center justify-center">
+                  <div className="w-3 h-3 rounded-full bg-red-noir animate-pulse" />
+                </div>
+
+                <motion.div
+                  initial={{ y: '42%' }}
+                  animate={{ y: '-92%' }}
+                  transition={{
+                    duration: WITNESS_RULE_SCROLL_MS / 1000,
+                    ease: 'linear',
+                  }}
+                  className="space-y-8"
+                >
+                  {WITNESS_LOADING_RULES.map((rule, index) => (
+                    <div key={rule} className="max-w-xl">
+                      <div className="font-mono text-[12px] tracking-[6px] text-red-noir/70 mb-2">
+                        {String(index + 1).padStart(2, '0')}
+                      </div>
+                      <p className="font-serif text-[clamp(26px,4.8vw,54px)] leading-[1.04] text-ink">
+                        {rule}
+                      </p>
+                      <div className="mt-5 h-px w-full bg-linear-to-r from-red-noir/35 via-border/40 to-transparent" />
+                    </div>
+                  ))}
+
+                  <div className="pt-6">
+                    <div className="font-mono text-[12px] tracking-[6px] text-red-noir/70 mb-2">
+                      05
+                    </div>
+                    <p className="font-display text-[clamp(30px,5.4vw,58px)] leading-[0.95] tracking-[0.12em] uppercase text-red-noir/85">
+                      Enter the interrogation chamber.
+                    </p>
+                  </div>
+                </motion.div>
+
+                <div className="absolute bottom-8 left-6 right-6 md:left-12 md:right-12 font-mono text-[9px] tracking-[4px] text-ink4 uppercase flex items-center justify-between">
+                  <span>Preparing witness profile...</span>
+                  <span>Stage 2 / 2</span>
+                </div>
+                <div className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-linear-to-b from-bg via-bg/75 to-transparent" />
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-bg via-bg/75 to-transparent" />
               </div>
-              <div className="h-10 w-full bg-red-noir/60 rounded animate-pulse" />
             </div>
-            <div className="mt-6 font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
-              Locating witness profile…
+
+            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 font-mono text-[9px] tracking-[5px] text-ink4 uppercase">
+              Locating witness profile...
             </div>
           </motion.div>
         )}
@@ -1263,6 +1507,29 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-2 gap-2 mb-5">
+                <button
+                  onClick={() => setInterrogationMode('text')}
+                  className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
+                    interrogationMode === 'text'
+                      ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                      : 'border-border text-ink3 hover:border-red-noir/50'
+                  }`}
+                >
+                  Interrogate With Text
+                </button>
+                <button
+                  onClick={() => setInterrogationMode('voice')}
+                  className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
+                    interrogationMode === 'voice'
+                      ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                      : 'border-border text-ink3 hover:border-red-noir/50'
+                  }`}
+                >
+                  Interrogate With Voice
+                </button>
+              </div>
+
               <AnimatePresence>
                 {!isWitnessTyping && typedOpeningStatement.length > 0 && (
                   <motion.button
@@ -1270,10 +1537,12 @@ export default function App() {
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: 8 }}
                     transition={{ duration: 0.35, ease: 'easeOut' }}
-                    onClick={() => setCurrentScreen('interrogation')}
+                    onClick={beginInterrogation}
                     className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
                   >
-                    BEGIN INTERROGATION
+                    {interrogationMode === 'voice'
+                      ? 'BEGIN VOICE INTERROGATION'
+                      : 'BEGIN TEXT INTERROGATION'}
                   </motion.button>
                 )}
               </AnimatePresence>
@@ -1342,16 +1611,23 @@ export default function App() {
                     }
                     className={`p-4 cursor-pointer transition-all ${
                       msg.role === 'user'
-                        ? 'bg-red-noir/10 border border-red-noir/30'
+                        ? msg.isStreaming
+                          ? 'bg-red-noir/5 border border-dashed border-red-noir/30 opacity-80'
+                          : 'bg-red-noir/10 border border-red-noir/30'
                         : msg.isContradiction
                           ? 'bg-amber-noir/10 border border-amber-noir shadow-[0_0_15px_rgba(224,168,32,0.2)]'
-                          : 'bg-surface border border-border'
+                          : msg.isStreaming
+                            ? 'bg-surface border border-dashed border-border opacity-80'
+                            : 'bg-surface border border-border'
                     }`}
                   >
                     <p
-                      className={`font-serif text-[15px] leading-relaxed ${msg.role === 'user' ? 'text-ink' : 'text-ink2'}`}
+                      className={`font-serif text-[15px] leading-relaxed ${msg.role === 'user' ? 'text-ink' : 'text-ink2'} ${msg.isStreaming ? 'italic' : ''}`}
                     >
                       {msg.text}
+                      {msg.isStreaming && (
+                        <span className="inline-block ml-1 w-[0.45ch] h-[0.9em] align-[-0.05em] bg-ink3/50 animate-pulse" />
+                      )}
                     </p>
                     {msg.isContradiction && (
                       <div className="mt-2 font-mono text-[8px] text-amber-noir uppercase tracking-widest flex items-center gap-1">
@@ -1361,9 +1637,15 @@ export default function App() {
                     )}
                   </div>
                   <div
-                    className={`mt-1 font-mono text-[7px] tracking-widest uppercase opacity-40 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}
+                    className={`mt-1 font-mono text-[7px] tracking-widest uppercase ${msg.isStreaming ? 'opacity-30' : 'opacity-40'} ${msg.role === 'user' ? 'text-right' : 'text-left'}`}
                   >
-                    {msg.role === 'user' ? 'Detective' : persona.name}
+                    {msg.role === 'user'
+                      ? msg.isStreaming
+                        ? 'Detective (speaking...)'
+                        : 'Detective'
+                      : msg.isStreaming
+                        ? `${persona.name} (speaking...)`
+                        : persona.name}
                   </div>
                 </motion.div>
               ))}
@@ -1386,12 +1668,17 @@ export default function App() {
             <div className="bg-surface border-t border-border p-4 pb-24">
               {/* Voice toggle */}
               <div className="flex items-center gap-2 mb-4">
-                <button
-                  type="button"
-                  onClick={() =>
-                    liveConnected
-                      ? (liveAudioPlayerRef.current.flush(), stopLive())
-                      : ((liveKickoffPendingRef.current = true),
+                {interrogationMode === 'voice' ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (liveConnected) {
+                          liveAudioPlayerRef.current.flush();
+                          stopLive();
+                          return;
+                        }
+                        liveKickoffPendingRef.current = true;
                         startLive(
                           {
                             name: persona.name,
@@ -1405,27 +1692,33 @@ export default function App() {
                           },
                           detections.map(d => d.label),
                           true
-                        ))
-                  }
-                  className={`font-mono text-[9px] tracking-[2px] px-3 py-2 border uppercase flex items-center gap-2 ${
-                    liveConnected
-                      ? 'border-red-noir bg-red-noir/10 text-red-noir'
-                      : 'border-border text-ink3 hover:border-red-noir/50'
-                  }`}
-                >
-                  <Mic className="w-3.5 h-3.5" />
-                  {liveConnected ? 'Stop voice' : 'Start voice interrogation'}
-                </button>
-                {liveConnected && (
+                        );
+                      }}
+                      className={`font-mono text-[9px] tracking-[2px] px-3 py-2 border uppercase flex items-center gap-2 ${
+                        liveConnected
+                          ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                          : 'border-border text-ink3 hover:border-red-noir/50'
+                      }`}
+                    >
+                      <Mic className="w-3.5 h-3.5" />
+                      {liveConnected ? 'Stop voice' : 'Reconnect voice'}
+                    </button>
+                    <span className="font-mono text-[8px] text-ink4 uppercase">
+                      {liveConnected
+                        ? liveStatus === 'witness_speaking'
+                          ? 'Voice mode: witness speaking…'
+                          : 'Voice mode: listening…'
+                        : 'Voice mode: connecting…'}
+                    </span>
+                    {liveError && (
+                      <span className="font-mono text-[8px] text-red-noir uppercase">
+                        {liveError}
+                      </span>
+                    )}
+                  </>
+                ) : (
                   <span className="font-mono text-[8px] text-ink4 uppercase">
-                    {liveStatus === 'witness_speaking'
-                      ? 'Witness speaking…'
-                      : 'Listening…'}
-                  </span>
-                )}
-                {liveError && (
-                  <span className="font-mono text-[8px] text-red-noir uppercase">
-                    {liveError}
+                    Text mode active
                   </span>
                 )}
               </div>
@@ -1975,7 +2268,7 @@ export default function App() {
       ].includes(currentScreen) && (
         <div className="fixed bottom-0 left-0 right-0 h-[62px] bg-bg/95 border-t border-border z-50 flex items-stretch">
           <button
-            onClick={() => setCurrentScreen('camera')}
+            onClick={() => navigateToScreen('camera')}
             className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'camera' ? 'border-red-noir' : 'border-transparent'}`}
           >
             <Camera
@@ -1990,7 +2283,7 @@ export default function App() {
           <button
             onClick={() => {
               if (!hasPersona) return;
-              setCurrentScreen('witness');
+              navigateToScreen('witness');
             }}
             className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'witness' ? 'border-red-noir' : 'border-transparent'} ${!hasPersona ? 'opacity-30 cursor-not-allowed' : ''}`}
           >
@@ -2006,7 +2299,7 @@ export default function App() {
           <button
             onClick={() => {
               if (!hasInterrogation) return;
-              setCurrentScreen('interrogation');
+              navigateToScreen('interrogation');
             }}
             className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'interrogation' ? 'border-red-noir' : 'border-transparent'} ${!hasInterrogation ? 'opacity-30 cursor-not-allowed' : ''}`}
           >
@@ -2022,7 +2315,7 @@ export default function App() {
           <button
             onClick={() => {
               if (!hasAccusation) return;
-              setCurrentScreen('accusation');
+              navigateToScreen('accusation');
             }}
             className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'accusation' ? 'border-red-noir' : 'border-transparent'} ${!hasAccusation ? 'opacity-30 cursor-not-allowed' : ''}`}
           >
@@ -2038,7 +2331,7 @@ export default function App() {
           <button
             onClick={() => {
               if (!hasVerdict) return;
-              setCurrentScreen('casefile');
+              navigateToScreen('casefile');
             }}
             className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'casefile' ? 'border-red-noir' : 'border-transparent'} ${!hasVerdict ? 'opacity-30 cursor-not-allowed' : ''}`}
           >
@@ -2057,16 +2350,23 @@ export default function App() {
       {currentScreen !== 'splash' && (
         <button
           onClick={() => {
-            if (currentScreen === 'onboarding') setCurrentScreen('splash');
-            else if (currentScreen === 'camera') setCurrentScreen('onboarding');
-            else setCurrentScreen('camera');
+            if (currentScreen === 'onboarding') navigateToScreen('splash');
+            else if (currentScreen === 'camera') navigateToScreen('onboarding');
+            else navigateToScreen('camera');
           }}
-          className="fixed top-4 left-6 z-[60] flex items-center gap-2 bg-bg/85 border border-border px-3 py-2 backdrop-blur-md active:bg-surface2 transition-all"
+          className={`fixed top-4 left-6 z-[60] flex items-center justify-center gap-2 bg-bg/85 border border-border backdrop-blur-md active:bg-surface2 transition-all ${
+            ['witness', 'interrogation'].includes(currentScreen)
+              ? 'w-11 h-11'
+              : 'px-3 py-2'
+          }`}
+          aria-label="Go back"
         >
           <ChevronLeft className="w-3 h-3 text-ink2" />
-          <span className="font-mono text-[8px] tracking-[3px] text-ink3 uppercase">
-            Back
-          </span>
+          {!['witness', 'interrogation'].includes(currentScreen) && (
+            <span className="font-mono text-[8px] tracking-[3px] text-ink3 uppercase">
+              Back
+            </span>
+          )}
         </button>
       )}
 
