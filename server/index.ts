@@ -11,7 +11,7 @@ const port = process.env.PORT || 8080;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-const apiKey = 'AIzaSyByJf7XYYVfOuwFxNc-47r6MgcpxeWOUyY';
+const apiKey = process.env.GEMINI_API_KEY;
 
 if (!apiKey) {
   console.warn(
