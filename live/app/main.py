@@ -33,6 +33,7 @@ from google.adk.runners import Runner  # pyright: ignore[reportMissingImports]
 from google.adk.sessions import InMemorySessionService  # pyright: ignore[reportMissingImports]
 
 from app.witness_agent.agent import build_witness_instructions, create_witness_agent
+from app.witness_agent.agent import WITNESS_LIVE_MODEL
 
 # Load .env from live/ so it works whether we run from repo root or live/
 _env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -41,6 +42,7 @@ load_dotenv(_env_path)
 if not os.getenv("GOOGLE_API_KEY") and os.getenv("GOOGLE_GENAI_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.environ["GOOGLE_GENAI_API_KEY"]
 logger = logging.getLogger(__name__)
+logger.info("Witness Live model: %s", WITNESS_LIVE_MODEL)
 
 APP_NAME = "witness-live"
 USER_ID_MVP = "witness-user"

@@ -7,12 +7,24 @@ import os
 
 from google.adk.agents import Agent
 
-# Model: Gemini Live native audio for Bidi streaming.
-# If you run into model availability issues, check the Live API docs and
-# update this ID to a currently supported native-audio model.
-WITNESS_LIVE_MODEL = os.getenv(
-    "WITNESS_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"
-)
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_live_model() -> str:
+    # Align with resources/Bidi_docs.txt defaults:
+    # - Gemini Live API (AI Studio): gemini-2.5-flash-native-audio-preview-12-2025
+    # - Vertex AI Live API: gemini-live-2.5-flash-native-audio
+    use_vertex = _is_truthy(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+    if use_vertex:
+        return "gemini-live-2.5-flash-native-audio"
+    return "gemini-2.5-flash-native-audio-preview-12-2025"
+
+
+# Allow explicit override, otherwise choose platform-aware default.
+WITNESS_LIVE_MODEL = os.getenv("WITNESS_LIVE_MODEL", _default_live_model())
 
 
 def build_witness_instructions(persona: dict, object_labels: list) -> str:
