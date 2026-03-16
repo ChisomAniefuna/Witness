@@ -463,6 +463,7 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
   const preRollChunksRef = useRef<ArrayBuffer[]>([]);
   const hasOutputTranscriptionInTurnRef = useRef(false);
   const userTranscriptClosedRef = useRef(false);
+  const hasUserTranscriptInTurnRef = useRef(false);
   const streamedTextRef = useRef<{ user: string; witness: string }>({
     user: '',
     witness: '',
@@ -560,6 +561,7 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
     preRollChunksRef.current = [];
     hasOutputTranscriptionInTurnRef.current = false;
     userTranscriptClosedRef.current = false;
+    hasUserTranscriptInTurnRef.current = false;
     echoFadeUntilRef.current = 0;
     resetStreamedText();
     setConnected(false);
@@ -794,6 +796,7 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             echoFadeUntilRef.current = Date.now() + ECHO_FADE_MS;
             hasOutputTranscriptionInTurnRef.current = false;
             userTranscriptClosedRef.current = false;
+            hasUserTranscriptInTurnRef.current = false;
             resetStreamedText('witness');
             onInterrupted?.();
             setStatusSafe('listening');
@@ -902,16 +905,19 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             userText && isLikelyEnglishText(userText)
           );
           if (userHasEnglishText) {
-            if (userTranscriptClosedRef.current) {
+            const isFinal = isFinalTranscript(inputTrans);
+            const alreadyClosed = userTranscriptClosedRef.current;
+            const hasUserTranscript = hasUserTranscriptInTurnRef.current;
+            if (alreadyClosed && (hasUserTranscript || !isFinal)) {
               // Input and output transcriptions can arrive out of order. Once the witness
-              // has started responding, ignore late user ASR finals to avoid duplicate bubbles.
+              // has started responding, ignore late user ASR partials and duplicates.
             } else {
-              const isFinal = isFinalTranscript(inputTrans);
               const streamedUserText = isFinal
                 ? chooseFinalTranscript(streamedTextRef.current.user, userText)
                 : mergeStreamedText('user', userText);
               streamedTextRef.current.user = streamedUserText;
               onUserTranscript?.(streamedUserText, isFinal);
+              hasUserTranscriptInTurnRef.current = true;
               if (isFinal) {
                 resetStreamedText('user');
                 userTranscriptClosedRef.current = true;
@@ -966,7 +972,9 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
               const isEnglishPayload = isLikelyEnglishText(textPayload);
               if (
                 role === 'user' &&
-                (userTranscriptClosedRef.current || !isEnglishPayload)
+                (!isEnglishPayload ||
+                  (userTranscriptClosedRef.current &&
+                    hasUserTranscriptInTurnRef.current))
               ) {
                 // Ignore late or obviously wrong-language user partials.
               } else if (!isEnglishPayload) {
@@ -976,6 +984,7 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
 
                 if (role === 'user') {
                   onUserTranscript?.(mergedText, false);
+                  hasUserTranscriptInTurnRef.current = true;
                 } else {
                   userTranscriptClosedRef.current = true;
                   setStatusSafe('witness_speaking');
@@ -1029,6 +1038,7 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             echoFadeUntilRef.current = Date.now() + ECHO_FADE_MS;
             hasOutputTranscriptionInTurnRef.current = false;
             userTranscriptClosedRef.current = false;
+            hasUserTranscriptInTurnRef.current = false;
             resetStreamedText();
             onTurnComplete?.();
             setStatusSafe('listening');

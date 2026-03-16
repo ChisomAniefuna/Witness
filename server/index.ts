@@ -180,14 +180,26 @@ app.post('/api/witness-persona', async (req, res) => {
     const prompt = `
       You are generating a murder mystery witness for a room that contains:
       [${objects.join(', ')}]. Generate a JSON persona:
-      { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
-        "guiltyOf": string, "secret": string ,"method":string}
+      {
+        "name": string,
+        "archetype": string,
+        "age": number,
+        "occupation": string,
+        "tells": string[],
+        "openingStatement": string,
+        "guiltyOf": string,
+        "secret": string,
+        "method": string,
+        "crimeSceneNarrative": string,
+        "objectConnections": [ { "object": string, "significance": string } ]
+      }
       The witness is guilty.
       - openingStatement is what they say when first approached — nervous, vague. 
-      -tells are 2–3 physical habits they have when lying. 
-      -guiltyOf and secret are their true motive and what they
-      are hiding.
-      -method is the method or way they did the crime,using objects of room.
+      - tells are 2–3 physical habits they have when lying. 
+      - guiltyOf and secret are their true motive and what they are hiding.
+      - method is the way they did the crime, using objects in the room.
+      - crimeSceneNarrative is their official story (2–3 sentences), mentioning at least 2 objects.
+      - objectConnections should link 3 objects to the crime (short, factual).
       - Return only JSON.
     `;
 
@@ -207,6 +219,19 @@ app.post('/api/witness-persona', async (req, res) => {
             openingStatement: { type: Type.STRING },
             guiltyOf: { type: Type.STRING },
             secret: { type: Type.STRING },
+            method: { type: Type.STRING },
+            crimeSceneNarrative: { type: Type.STRING },
+            objectConnections: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  object: { type: Type.STRING },
+                  significance: { type: Type.STRING },
+                },
+                required: ['object', 'significance'],
+              },
+            },
           },
           required: [
             'name',
@@ -217,6 +242,9 @@ app.post('/api/witness-persona', async (req, res) => {
             'openingStatement',
             'guiltyOf',
             'secret',
+            'method',
+            'crimeSceneNarrative',
+            'objectConnections',
           ],
         },
       },
@@ -572,16 +600,27 @@ app.post('/api/accusation-options', async (req, res) => {
 app.post('/api/evaluate', async (req, res) => {
   try {
     const { accusation, truth } = req.body as {
-      accusation: { suspect: string; method: string; motive: string };
-      truth: { witness: string; objects: string[]; guiltyOf: string;method:string };
+      accusation: { suspect: string; method: string; motive: string; theory?: string };
+      truth: { witness: string; objects: string[]; guiltyOf: string; method: string };
     };
     const model = 'gemini-3-flash-preview';
     const prompt = `
       The player accused ${accusation.suspect} using ${accusation.method} motivated by ${accusation.motive}.
-      The true answer: ${truth.witness} is guilty, method was ${truth.method}, motive was ${truth.guiltyOf}.
+      Player's theory: "${accusation.theory || ''}"
 
-      Return JSON: { "correct": boolean, "verdict": string, "explanation": string }
-      where verdict is a dramatic one-liner and explanation is a 2-sentence case summary.
+      The true answer: ${truth.witness} is guilty, method was ${truth.method}, motive was ${truth.guiltyOf}.
+      Key evidence objects: [${truth.objects.join(', ')}]
+
+      Return JSON:
+      {
+        "correct": boolean,
+        "verdict": string,
+        "explanation": string,
+        "oneTrueThing": string,
+        "testimonyReview": [ { "quote": string, "status": "CONTRADICTION" | "UNVERIFIED" | "VERIFIED" | "CRITICAL" } ]
+      }
+      where verdict is a dramatic one-liner and explanation is a 2–3 sentence case summary.
+      oneTrueThing is a short final true statement from the witness.
     `;
 
     const response = await ai.models.generateContent({
@@ -595,8 +634,29 @@ app.post('/api/evaluate', async (req, res) => {
             correct: { type: Type.BOOLEAN },
             verdict: { type: Type.STRING },
             explanation: { type: Type.STRING },
+            oneTrueThing: { type: Type.STRING },
+            testimonyReview: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  quote: { type: Type.STRING },
+                  status: {
+                    type: Type.STRING,
+                    enum: ['CONTRADICTION', 'UNVERIFIED', 'VERIFIED', 'CRITICAL'],
+                  },
+                },
+                required: ['quote', 'status'],
+              },
+            },
           },
-          required: ['correct', 'verdict', 'explanation'],
+          required: [
+            'correct',
+            'verdict',
+            'explanation',
+            'oneTrueThing',
+            'testimonyReview',
+          ],
         },
       },
     });

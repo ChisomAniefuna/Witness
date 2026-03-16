@@ -65,6 +65,11 @@ interface Message {
   id?: string;
 }
 
+interface TestimonyReview {
+  quote: string;
+  status: 'CONTRADICTION' | 'UNVERIFIED' | 'VERIFIED' | 'CRITICAL';
+}
+
 interface AccusationOptions {
   suspects: string[];
   methods: string[];
@@ -75,9 +80,20 @@ interface Verdict {
   correct: boolean;
   verdict: string;
   explanation: string;
+  oneTrueThing?: string;
+  testimonyReview?: TestimonyReview[];
+}
+
+interface DetectiveProfile {
+  displayName: string;
+  totalScore: number;
+  casesSolved: number;
+  casesAttempted: number;
+  badges: string[];
 }
 
 const STORAGE_KEY = 'witness_state_v1';
+const DETECTIVE_PROFILE_KEY = 'witness_detective_profile_v1';
 const CAMERA_PERMISSION_KEY = 'witness_camera_permission_v1';
 
 const WITNESS_LOADING_RULES = [
@@ -109,6 +125,7 @@ interface PersistedStateV1 {
   selectedSuspect: string | null;
   selectedMotive: string | null;
   selectedMethod: string | null;
+  theory: string;
   verdict: Verdict | null;
   timeline: string[];
   caseSignature: string | null;
@@ -140,6 +157,31 @@ function persistState(state: PersistedStateV1): void {
   } catch {
     // Ignore write errors (private mode, quota, etc.)
   }
+}
+
+function loadDetectiveProfile(): DetectiveProfile | null {
+  try {
+    const raw = localStorage.getItem(DETECTIVE_PROFILE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DetectiveProfile;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function persistDetectiveProfile(profile: DetectiveProfile): void {
+  try {
+    localStorage.setItem(DETECTIVE_PROFILE_KEY, JSON.stringify(profile));
+  } catch {}
+}
+
+function getProfileRating(score: number): string {
+  if (score > 500) return 'LEGENDARY';
+  if (score > 200) return 'SENIOR';
+  if (score > 50) return 'OFFICER';
+  return 'ROOKIE';
 }
 
 function resolveInitialScreen(persisted: PersistedStateV1 | null): Screen {
@@ -440,6 +482,7 @@ export default function App() {
   const [selectedMethod, setSelectedMethod] = useState<string | null>(
     () => persistedState?.selectedMethod ?? null
   );
+  const [theory, setTheory] = useState(() => persistedState?.theory ?? '');
   const [activeEvidence, setActiveEvidence] = useState<string | null>(null);
   const [caseSignature, setCaseSignature] = useState<string | null>(
     () => persistedState?.caseSignature ?? null
@@ -453,15 +496,29 @@ export default function App() {
   const [isSafetyFlagged, setIsSafetyFlagged] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [detectiveName, setDetectiveName] = useState('');
+  const [detectiveProfile, setDetectiveProfile] =
+    useState<DetectiveProfile | null>(() => loadDetectiveProfile());
   const [typedOpeningStatement, setTypedOpeningStatement] = useState('');
   const [isWitnessTyping, setIsWitnessTyping] = useState(false);
+  const [videoBox, setVideoBox] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const cameraFrameRef = useRef<HTMLDivElement>(null);
   const liveAudioPlayerRef = useRef(createLiveAudioPlayer());
   const liveKickoffPendingRef = useRef(false);
   const forceNewLiveMessageRef = useRef(false);
+  const lastServerTranscriptAtRef = useRef(0);
+  const lastLocalTranscriptRef = useRef<{ text: string; at: number }>({
+    text: '',
+    at: 0,
+  });
   const currentScreenRef = useRef<Screen>(currentScreen);
   const witnessTypeAudioCtxRef = useRef<AudioContext | null>(null);
   const typedStatementForRef = useRef('');
@@ -719,6 +776,15 @@ export default function App() {
         forceNewLiveMessageRef.current = false;
       } else if (last?.role === role) {
         const lastText = last.text.trim();
+        if (!last.isStreaming && !isFinal) {
+          if (
+            normalizeMessageText(trimmed) === normalizeMessageText(lastText) ||
+            lastText.startsWith(trimmed) ||
+            trimmed.startsWith(lastText)
+          ) {
+            return prev;
+          }
+        }
         if (normalizeMessageText(trimmed) === normalizeMessageText(lastText)) {
           return prev;
         }
@@ -754,6 +820,11 @@ export default function App() {
     });
   };
 
+  const handleLiveUserTranscript = (text: string, isFinal?: boolean) => {
+    lastServerTranscriptAtRef.current = Date.now();
+    upsertLiveTranscript('user', text, isFinal);
+  };
+
   const {
     connected: liveConnected,
     error: liveError,
@@ -762,8 +833,7 @@ export default function App() {
     stopLive,
     sendText: sendLiveText,
   } = useWitnessLive({
-    onUserTranscript: (text, isFinal) =>
-      upsertLiveTranscript('user', text, isFinal),
+    onUserTranscript: handleLiveUserTranscript,
     onWitnessTranscript: (text, isFinal) => {
       // In some sessions turn_complete can be delayed/missed after interruption.
       // Release on first non-final witness transcript so new audio is not stuck muted.
@@ -799,6 +869,67 @@ export default function App() {
       window.setTimeout(() => sendLiveText('Begin interrogation.'), 100);
     },
   });
+
+  useEffect(() => {
+    if (interrogationMode !== 'voice' || !liveConnected) return;
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition: any = new SpeechRecognition();
+    let stopped = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    const startIfListening = () => {
+      if (stopped || liveStatus !== 'listening') return;
+      try {
+        recognition.start();
+      } catch (_) {
+        // ignore double-start errors
+      }
+    };
+
+    recognition.onresult = (event: any) => {
+      const now = Date.now();
+      if (now - lastServerTranscriptAtRef.current < 1200) return;
+      let interim = '';
+      let finalText = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const res = event.results[i];
+        const transcript = res?.[0]?.transcript ?? '';
+        if (res?.isFinal) finalText += transcript;
+        else interim += transcript;
+      }
+      const text = (finalText || interim).trim();
+      if (!text) return;
+      const normalized = normalizeMessageText(text);
+      const last = lastLocalTranscriptRef.current;
+      if (
+        normalized &&
+        normalized === normalizeMessageText(last.text) &&
+        now - last.at < 1500
+      ) {
+        return;
+      }
+      lastLocalTranscriptRef.current = { text, at: now };
+      upsertLiveTranscript('user', text, Boolean(finalText));
+    };
+
+    recognition.onend = () => {
+      if (!stopped) startIfListening();
+    };
+
+    startIfListening();
+
+    return () => {
+      stopped = true;
+      try {
+        recognition.stop();
+      } catch (_) {}
+    };
+  }, [interrogationMode, liveConnected, liveStatus]);
 
   const stopVoiceInterrogation = () => {
     liveKickoffPendingRef.current = false;
@@ -996,6 +1127,34 @@ export default function App() {
   }, [isDark]);
 
   useEffect(() => {
+    const trimmedName = detectiveName.trim();
+    if (!trimmedName) return;
+    setDetectiveProfile(prev => {
+      if (prev) {
+        if (prev.displayName === trimmedName) return prev;
+        const updated = { ...prev, displayName: trimmedName };
+        persistDetectiveProfile(updated);
+        return updated;
+      }
+      const fresh: DetectiveProfile = {
+        displayName: trimmedName,
+        totalScore: 0,
+        casesSolved: 0,
+        casesAttempted: 0,
+        badges: [],
+      };
+      persistDetectiveProfile(fresh);
+      return fresh;
+    });
+  }, [detectiveName]);
+
+  useEffect(() => {
+    if (detectiveProfile) {
+      persistDetectiveProfile(detectiveProfile);
+    }
+  }, [detectiveProfile]);
+
+  useEffect(() => {
     if (!caseSignature && detections.length) {
       setCaseSignature(
         buildCaseSignatureFromLabels(detections.map(d => d.label))
@@ -1023,6 +1182,7 @@ export default function App() {
       selectedSuspect,
       selectedMotive,
       selectedMethod,
+      theory,
       verdict,
       timeline,
       caseSignature,
@@ -1044,6 +1204,7 @@ export default function App() {
     selectedSuspect,
     selectedMotive,
     selectedMethod,
+    theory,
     verdict,
     timeline,
     caseSignature,
@@ -1064,6 +1225,7 @@ export default function App() {
         streamRef.current = stream;
         setCameraStatus('live');
         writeCameraPermission(true);
+        window.setTimeout(() => updateVideoBox(), 50);
       }
     } catch (err) {
       console.error('Camera error:', err);
@@ -1078,6 +1240,31 @@ export default function App() {
       streamRef.current = null;
     }
     setCameraStatus('idle');
+  };
+
+  const updateVideoBox = () => {
+    if (!cameraFrameRef.current || !videoRef.current) return;
+    const rect = cameraFrameRef.current.getBoundingClientRect();
+    const videoWidth = videoRef.current.videoWidth || 1280;
+    const videoHeight = videoRef.current.videoHeight || 720;
+    if (!rect.width || !rect.height) return;
+
+    const containerRatio = rect.width / rect.height;
+    const videoRatio = videoWidth / videoHeight;
+    let width = rect.width;
+    let height = rect.height;
+
+    if (videoRatio > containerRatio) {
+      width = rect.width;
+      height = rect.width / videoRatio;
+    } else {
+      height = rect.height;
+      width = rect.height * videoRatio;
+    }
+
+    const x = (rect.width - width) / 2;
+    const y = (rect.height - height) / 2;
+    setVideoBox({ x, y, width, height });
   };
 
   useEffect(() => {
@@ -1127,6 +1314,13 @@ export default function App() {
       cancelled = true;
       stopCamera();
     };
+  }, [currentScreen]);
+
+  useEffect(() => {
+    if (currentScreen !== 'camera') return;
+    const onResize = () => updateVideoBox();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, [currentScreen]);
 
   useEffect(() => {
@@ -1184,6 +1378,7 @@ export default function App() {
     setIsScanning(true);
     setShowProceed(false);
     setDetections([]);
+    setTheory('');
     setCaseFile(null);
     setAnalysisError(false);
     setWitnessQuote(null);
@@ -1275,6 +1470,9 @@ export default function App() {
         secret: 'He was sleeping on the job when the crime occurred.',
         method:
           'killed the person with knife he brought,then threw him from the balcony to make it seem like an accident',
+        crimeSceneNarrative:
+          'I was on duty when I heard a crash. I went in, saw the room in disarray, and left before anyone noticed.',
+        objectConnections: [],
       };
       queueOrCommitWitnessPersona(fallback);
     } finally {
@@ -1288,6 +1486,14 @@ export default function App() {
       setIsWitnessRuleScrollDone(true);
     }, WITNESS_RULE_SCROLL_MS);
     return () => window.clearTimeout(timer);
+  }, [currentScreen, isGeneratingPersona]);
+
+  useEffect(() => {
+    if (currentScreen === 'witness') return;
+    if (isGeneratingPersona) {
+      setIsGeneratingPersona(false);
+      pendingPersonaRef.current = null;
+    }
   }, [currentScreen, isGeneratingPersona]);
 
   useEffect(() => {
@@ -1349,6 +1555,16 @@ export default function App() {
         meta?.onComplete?.();
       }
     }, 18);
+  };
+
+  const sendLiveUserText = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (liveStatus === 'witness_speaking') {
+      liveAudioPlayerRef.current?.stop();
+    }
+    upsertLiveTranscript('user', trimmed, true);
+    sendLiveText(trimmed);
   };
 
   const sendMessage = async () => {
@@ -1430,6 +1646,50 @@ export default function App() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const applyVerdictToProfile = (isCorrect: boolean) => {
+    setDetectiveProfile(prev => {
+      const baseProfile: DetectiveProfile =
+        prev ?? {
+          displayName: detectiveName.trim() || 'DETECTIVE',
+          totalScore: 0,
+          casesSolved: 0,
+          casesAttempted: 0,
+          badges: [],
+        };
+
+      const baseScore = isCorrect ? 120 : 40;
+      const contradictionBonus = contradictionCount * 15;
+      const timeBonus = Math.min(60, Math.floor(timeLeft / 10));
+      const caseScore = baseScore + contradictionBonus + timeBonus;
+
+      const casesSolved = baseProfile.casesSolved + (isCorrect ? 1 : 0);
+      const casesAttempted = baseProfile.casesAttempted + 1;
+      const totalScore = baseProfile.totalScore + caseScore;
+
+      const badges = [...baseProfile.badges];
+      if (!badges.includes('first_case')) {
+        badges.push('first_case');
+      }
+      if (caseScore >= 100 && !badges.includes('sharp_eye')) {
+        badges.push('sharp_eye');
+      }
+      if (casesSolved >= 5 && !badges.includes('veteran')) {
+        badges.push('veteran');
+      }
+
+      const updated = {
+        ...baseProfile,
+        totalScore,
+        casesSolved,
+        casesAttempted,
+        badges,
+      };
+
+      persistDetectiveProfile(updated);
+      return updated;
+    });
+  };
+
   const handleAccuse = async () => {
     if (!persona) return;
     navigateToScreen('accusation');
@@ -1449,7 +1709,13 @@ export default function App() {
   };
 
   const handleSubmitVerdict = async () => {
-    if (!selectedSuspect || !selectedMotive || !selectedMethod || !persona)
+    if (
+      !selectedSuspect ||
+      !selectedMotive ||
+      !selectedMethod ||
+      !persona ||
+      !theory.trim()
+    )
       return;
     setIsEvaluating(true);
     const startedAt = Date.now();
@@ -1460,6 +1726,7 @@ export default function App() {
           suspect: selectedSuspect,
           method: selectedMethod,
           motive: selectedMotive,
+          theory: theory.trim(),
         },
         {
           witness: persona.name,
@@ -1469,6 +1736,7 @@ export default function App() {
         }
       );
       setVerdict(res);
+      applyVerdictToProfile(res.correct);
 
       const t = await generateCaseFileTimeline(
         persona,
@@ -2006,11 +2274,13 @@ export default function App() {
                     <section>
                       <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
-                        Case Scene Narrative
+                        Crime Scene Narrative
                       </div>
                       <div className="bg-bg2 p-6 border-l-2 border-red-noir/30">
                         <p className="font-serif text-[15px] text-ink2 leading-relaxed italic">
-                          "{witnessQuote || persona.openingStatement}"
+                          "{persona.crimeSceneNarrative ||
+                            witnessQuote ||
+                            persona.openingStatement}"
                         </p>
                       </div>
                     </section>
@@ -2021,7 +2291,29 @@ export default function App() {
                         <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
                         Evidence Connections
                       </div>
-                      {detections.length === 0 ? (
+                      {persona.objectConnections &&
+                      persona.objectConnections.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-4">
+                          {persona.objectConnections.map((conn, i) => (
+                            <div
+                              key={`${conn.object}-${i}`}
+                              className="group flex items-start gap-4 p-4 bg-bg border border-border hover:border-red-noir/30 transition-colors"
+                            >
+                              <div className="w-8 h-8 rounded-full bg-bg2 border border-border flex items-center justify-center font-mono text-[10px] text-ink4 group-hover:text-red-noir transition-colors">
+                                0{i + 1}
+                              </div>
+                              <div className="flex-1">
+                                <span className="font-display text-[11px] text-ink tracking-[2px] uppercase block mb-1">
+                                  {conn.object}
+                                </span>
+                                <p className="font-serif text-[13px] text-ink3 leading-snug">
+                                  {conn.significance}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : detections.length === 0 ? (
                         <div className="border border-border bg-bg2 p-4 text-sm text-ink3 italic">
                           No evidence logged yet. Return to the scene and scan the room.
                         </div>
@@ -2350,9 +2642,7 @@ export default function App() {
                   onKeyPress={e => {
                     if (e.key !== 'Enter') return;
                     if (liveConnected && userInput.trim()) {
-                      if (liveStatus === 'witness_speaking')
-                        liveAudioPlayerRef.current?.stop();
-                      sendLiveText(userInput.trim());
+                      sendLiveUserText(userInput);
                       setUserInput('');
                     } else if (!liveConnected) sendMessage();
                   }}
@@ -2367,9 +2657,7 @@ export default function App() {
                   onClick={() => {
                     if (liveConnected) {
                       if (userInput.trim()) {
-                        if (liveStatus === 'witness_speaking')
-                          liveAudioPlayerRef.current?.stop();
-                        sendLiveText(userInput.trim());
+                        sendLiveUserText(userInput);
                       }
                       setUserInput('');
                     } else {
@@ -2523,9 +2811,24 @@ export default function App() {
                 </div>
               </section>
 
+              <section>
+                <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-2">
+                  4. The Theory
+                </div>
+                <textarea
+                  value={theory}
+                  onChange={e => setTheory(e.target.value)}
+                  placeholder="Explain what happened..."
+                  className="w-full bg-surface border border-border p-4 font-serif text-sm text-ink placeholder:text-ink4 focus:outline-none focus:border-red-noir/50 min-h-[120px] resize-none"
+                />
+              </section>
+
               <button
                 disabled={
-                  !selectedSuspect || !selectedMotive || !selectedMethod
+                  !selectedSuspect ||
+                  !selectedMotive ||
+                  !selectedMethod ||
+                  !theory.trim()
                 }
                 onClick={handleSubmitVerdict}
                 className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-5 shadow-[0_0_25px_rgba(155,35,24,0.4)] active:scale-95 transition-all disabled:opacity-30 disabled:grayscale"
@@ -2770,6 +3073,17 @@ export default function App() {
                   </p>
                 </div>
 
+                {verdict.oneTrueThing && (
+                  <div className="bg-amber-noir/5 p-6 border border-amber-noir/30 mb-10 relative">
+                    <div className="absolute -top-3 left-4 bg-bg px-2 font-mono text-[8px] text-amber-noir tracking-[3px] uppercase">
+                      The Final Truth
+                    </div>
+                    <p className="font-serif text-lg italic text-ink leading-relaxed">
+                      "{verdict.oneTrueThing}"
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-12">
                   <section>
                     <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-1">
@@ -2794,14 +3108,18 @@ export default function App() {
                       Testimony Review
                     </div>
                     <div className="space-y-3">
-                      {testimonyReview.length === 0 ? (
+                      {(verdict.testimonyReview?.length ?? 0) === 0 &&
+                      testimonyReview.length === 0 ? (
                         <div className="bg-surface p-3 border border-border">
                           <p className="font-serif text-sm text-ink2 italic">
                             No testimony recorded yet.
                           </p>
                         </div>
                       ) : (
-                        testimonyReview.map((review, i) => (
+                        (verdict.testimonyReview?.length
+                          ? verdict.testimonyReview
+                          : testimonyReview
+                        ).map((review, i) => (
                           <div
                             key={i}
                             className="bg-surface p-3 border border-border"
@@ -2852,6 +3170,57 @@ export default function App() {
                     </div>
                   </section>
 
+                  {detectiveProfile && (
+                    <section>
+                      <div className="bg-bg2 border border-border p-6 relative overflow-hidden">
+                        <div className="absolute top-0 right-0 p-2 opacity-10">
+                          <Scale className="w-12 h-12" />
+                        </div>
+                        <div className="font-mono text-[8px] tracking-[3px] text-amber-noir uppercase mb-4">
+                          Permanent Record Updated
+                        </div>
+                        <div className="flex justify-between items-end">
+                          <div>
+                            <div className="font-mono text-[7px] text-ink4 uppercase">
+                              Total Career Score
+                            </div>
+                            <div className="font-display text-3xl text-ink">
+                              {detectiveProfile.totalScore}
+                            </div>
+                            <div className="mt-2 font-mono text-[7px] text-ink4 uppercase">
+                              Cases Solved
+                            </div>
+                            <div className="font-display text-xl text-ink">
+                              {detectiveProfile.casesSolved}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-mono text-[7px] text-ink4 uppercase">
+                              Rating
+                            </div>
+                            <div className="font-display text-xl text-amber-noir">
+                              {getProfileRating(detectiveProfile.totalScore)}
+                            </div>
+                          </div>
+                        </div>
+                        {detectiveProfile.badges.length > 0 && (
+                          <div className="mt-4 pt-4 border-t border-border/30 flex gap-2 flex-wrap">
+                            {detectiveProfile.badges.map(badge => (
+                              <div
+                                key={badge}
+                                className="flex items-center gap-1 bg-surface px-2 py-1 border border-border"
+                              >
+                                <span className="font-mono text-[7px] text-ink2 uppercase">
+                                  {badge.replace('_', ' ')}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  )}
+
                   <button
                     onClick={() => {
                       try {
@@ -2878,18 +3247,69 @@ export default function App() {
             className="fixed inset-0 z-10 flex flex-col bg-bg"
           >
             <div className="flex-1 relative overflow-hidden bg-bg2">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${cameraStatus === 'live' ? 'opacity-100' : 'opacity-0'}`}
-              />
+              <div
+                ref={cameraFrameRef}
+                className="absolute inset-0"
+              >
+                <div
+                  className="absolute"
+                  style={
+                    videoBox
+                      ? {
+                          left: videoBox.x,
+                          top: videoBox.y,
+                          width: videoBox.width,
+                          height: videoBox.height,
+                        }
+                      : { inset: 0 }
+                  }
+                >
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    onLoadedMetadata={updateVideoBox}
+                    className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-700 ${cameraStatus === 'live' ? 'opacity-100' : 'opacity-0'}`}
+                  />
 
-              <canvas
-                ref={canvasRef}
-                className="absolute inset-0 w-full h-full object-cover hidden"
-              />
+                  <canvas
+                    ref={canvasRef}
+                    className="absolute inset-0 w-full h-full object-contain hidden"
+                  />
+
+                  {/* Detection Layer */}
+                  <div className="absolute inset-0 z-20">
+                    {detections.map((obj, i) => (
+                      <motion.div
+                        key={i}
+                        initial={{ opacity: 0, scale: 0.88 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className={`absolute border ${obj.flagged ? 'border-amber-noir bg-amber-noir/10' : 'border-greenbr bg-greenbr/10'} animate-box-pulse`}
+                        style={{
+                          left: `${obj.x}%`,
+                          top: `${obj.y}%`,
+                          width: `${obj.w}%`,
+                          height: `${obj.h}%`,
+                        }}
+                      >
+                        <div className="absolute bottom-full left-0 mb-0.5 flex items-center gap-0">
+                          <span
+                            className={`font-mono text-[8px] tracking-tight ${obj.flagged ? 'text-amber-noir' : 'text-greenbr'} bg-surface/90 px-2 py-0.5 whitespace-nowrap border border-border/50`}
+                          >
+                            {obj.label.toUpperCase()}
+                          </span>
+                          {obj.flagged && (
+                            <span className="bg-amber-noir/20 text-amber-noir text-[8px] px-1 py-0.5">
+                              ⚠
+                            </span>
+                          )}
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                </div>
+              </div>
 
               {/* CRT Overlays */}
               <div className="absolute inset-0 z-10 pointer-events-none bg-[repeating-linear-gradient(0deg,transparent,transparent_3px,rgba(0,0,0,0.03)_3px,rgba(0,0,0,0.03)_4px)]" />
@@ -2930,37 +3350,6 @@ export default function App() {
                 <span className="block text-[22px] font-display text-ink tracking-normal leading-none">
                   {detections.length}
                 </span>
-              </div>
-
-              {/* Detection Layer */}
-              <div className="absolute inset-0 z-20">
-                {detections.map((obj, i) => (
-                  <motion.div
-                    key={i}
-                    initial={{ opacity: 0, scale: 0.88 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className={`absolute border ${obj.flagged ? 'border-amber-noir bg-amber-noir/10' : 'border-greenbr bg-greenbr/10'} animate-box-pulse`}
-                    style={{
-                      left: `${obj.x}%`,
-                      top: `${obj.y}%`,
-                      width: `${obj.w}%`,
-                      height: `${obj.h}%`,
-                    }}
-                  >
-                    <div className="absolute bottom-full left-0 mb-0.5 flex items-center gap-0">
-                      <span
-                        className={`font-mono text-[8px] tracking-tight ${obj.flagged ? 'text-amber-noir' : 'text-greenbr'} bg-surface/90 px-2 py-0.5 whitespace-nowrap border border-border/50`}
-                      >
-                        {obj.label.toUpperCase()}
-                      </span>
-                      {obj.flagged && (
-                        <span className="bg-amber-noir/20 text-amber-noir text-[8px] px-1 py-0.5">
-                          ⚠
-                        </span>
-                      )}
-                    </div>
-                  </motion.div>
-                ))}
               </div>
 
               {/* Scanning Overlay */}
@@ -3036,7 +3425,7 @@ export default function App() {
 
               <div className="flex items-center justify-center gap-6 py-2">
                 <div className="flex-1 text-center">
-                  <span className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase">
+                  <span className="font-mono text-[9px] tracking-[4px] text-ink2 uppercase">
                     TAP TO SCAN
                   </span>
                 </div>
@@ -3061,9 +3450,7 @@ export default function App() {
                     onClick={handleMeetWitness}
                     className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
                   >
-                    {isGeneratingPersona
-                      ? 'LOCATING WITNESS...'
-                      : 'MEET THE WITNESS →'}
+                    MEET THE WITNESS →
                   </button>
                 </motion.div>
               )}

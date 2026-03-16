@@ -161,14 +161,26 @@ app.post('/api/witness-persona', async (req, res) => {
     const prompt = `
         You are generating a murder mystery witness for a room that contains:
       [${objects.join(', ')}]. Generate a JSON persona:
-      { "name": string, "archetype": string, "age": number, "occupation": string, "tells": string[], "openingStatement": string,
-        "guiltyOf": string, "secret": string ,"method":string}
+      {
+        "name": string,
+        "archetype": string,
+        "age": number,
+        "occupation": string,
+        "tells": string[],
+        "openingStatement": string,
+        "guiltyOf": string,
+        "secret": string,
+        "method": string,
+        "crimeSceneNarrative": string,
+        "objectConnections": [ { "object": string, "significance": string } ]
+      }
       The witness is guilty.
       - openingStatement is what they say when first approached — nervous, vague. 
-      -tells are 2–3 physical habits they have when lying. 
-      -guiltyOf and secret are their true motive and what they
-      are hiding,what crome they commited using objects of room.
-      -method is the method or way they did the crime,using objects of room.
+      - tells are 2–3 physical habits they have when lying. 
+      - guiltyOf and secret are their true motive and what they are hiding.
+      - method is the method or way they did the crime, using objects of room.
+      - crimeSceneNarrative is their official story (2–3 sentences), mentioning at least 2 objects.
+      - objectConnections should link 3 objects to the crime (short, factual).
       - Return only JSON.
     `;
 
@@ -484,6 +496,7 @@ app.post('/api/evaluate', async (req, res) => {
       Suspect: ${accusation.suspect}
       Method:   ${accusation.method}
       Motive:   ${accusation.motive}
+      Theory:   ${accusation.theory || ''}
  
       The true answer:
       ${truth.witness} is guilty.
@@ -494,10 +507,10 @@ app.post('/api/evaluate', async (req, res) => {
       Evaluate the accusation and return JSON:
       {
       "correct": boolean,
-      "verdict": string,      // dramatic one-liner — e.g.
-                             // "Case closed. Justice served." or
-                             // "Wrong. The killer walks free."
-      "explanation": string,  // 2 sentences: what actually happened
+      "verdict": string,
+      "explanation": string,
+      "oneTrueThing": string,
+      "testimonyReview": [ { "quote": string, "status": "CONTRADICTION" | "UNVERIFIED" | "VERIFIED" | "CRITICAL" } ]
       }
  
       Return only valid JSON. No markdown.
