@@ -160,7 +160,7 @@ app.post('/api/witness-persona', async (req, res) => {
     const model = 'gemini-2.5-flash';
     const prompt = `
         You are generating a murder mystery witness for a room that contains:
-      [${objects.join(', ')}]. Generate a JSON persona:
+      [${objects.join(', ')}]. witness will always be feamle.Generate a JSON persona:
       {
         "name": string,
         "archetype": string,

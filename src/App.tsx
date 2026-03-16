@@ -3779,10 +3779,9 @@ export default function App() {
 
               <div className="flex items-center justify-center gap-6 py-2">
                 <div className="flex-1 text-center">
-                  <span className="font-mono text-[9px] tracking-[4px] text-ink2 uppercase">
-                    TAP TO SCAN
-                  </span>
+                  
                 </div>
+                
                 <button
                   onClick={cameraStatus === 'live' ? captureScene : startCamera}
                   className={`w-16 h-16 rounded-full border-4 border-ink2 flex items-center justify-center transition-all active:scale-90 relative ${isScanning ? 'cursor-not-allowed' : 'cursor-pointer'}`}
@@ -3792,7 +3791,19 @@ export default function App() {
                   />
                 </button>
                 <div className="flex-1" />
+                
               </div>
+              <button
+                    onClick={() => {
+                      try {
+                        localStorage.removeItem(STORAGE_KEY);
+                      } catch {}
+                      window.location.reload();
+                    }}
+                    className="w-full font-display text-xs tracking-[5px] text-ink uppercase bg-surface border border-border py-5 active:bg-surface2 transition-all"
+                  >
+                    NEW INVESTIGATION
+                  </button>
 
               {caseFile && (
                 <motion.div
