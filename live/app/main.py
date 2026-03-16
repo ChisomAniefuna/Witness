@@ -53,6 +53,15 @@ logger.info("Witness Live model: %s", WITNESS_LIVE_MODEL)
 if WITNESS_LIVE_FALLBACK_MODELS:
     logger.info("Witness Live fallback models: %s", WITNESS_LIVE_FALLBACK_MODELS)
 
+
+def _is_transient_live_unavailable(err: Exception) -> bool:
+    """Return True when Live API reports temporary service unavailability."""
+    status_code = getattr(err, "status_code", None)
+    if status_code == 1011:
+        return True
+    text = str(err).lower()
+    return "service is currently unavailable" in text
+
 APP_NAME = "witness-live"
 USER_ID_MVP = "witness-user"
 
@@ -290,15 +299,23 @@ async def websocket_live(websocket: WebSocket):
             )
             # Notify client of error and close WebSocket so it can recover cleanly.
             try:
+                is_transient = _is_transient_live_unavailable(e)
+                hint = (
+                    "Gemini Live is temporarily unavailable. Please retry in a few seconds."
+                    if is_transient
+                    else (
+                        "Try setting WITNESS_LIVE_MODEL to a supported Live model for this key/project. "
+                        "If using Vertex, also set GOOGLE_GENAI_USE_VERTEXAI=true with GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION."
+                    )
+                )
                 error_payload = {
                     "type": "error",
                     "message": "Live API connection closed",
                     "detail": str(e),
                     "model": WITNESS_LIVE_MODEL,
-                    "hint": (
-                        "Try setting WITNESS_LIVE_MODEL to a supported Live model for this key/project. "
-                        "If using Vertex, also set GOOGLE_GENAI_USE_VERTEXAI=true with GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION."
-                    ),
+                    "hint": hint,
+                    "retryable": is_transient,
+                    "error_code": getattr(e, "status_code", None),
                     "fallback_models": WITNESS_LIVE_FALLBACK_MODELS,
                 }
                 await websocket.send_text(json.dumps(error_payload))

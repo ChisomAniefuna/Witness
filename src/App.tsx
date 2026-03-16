@@ -95,6 +95,8 @@ interface DetectiveProfile {
 const STORAGE_KEY = 'witness_state_v1';
 const DETECTIVE_PROFILE_KEY = 'witness_detective_profile_v1';
 const CAMERA_PERMISSION_KEY = 'witness_camera_permission_v1';
+const LIVE_RECONNECT_MAX_ATTEMPTS = 3;
+const LIVE_RECONNECT_BASE_DELAY_MS = 1200;
 
 const WITNESS_LOADING_RULES = [
   'Lead with one clear question.',
@@ -137,6 +139,15 @@ function normalizeMessageText(text: string): string {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function isTransientLiveError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('service is currently unavailable') ||
+    normalized.includes('service unavailable') ||
+    normalized.includes('1011')
+  );
 }
 
 function loadPersistedState(): PersistedStateV1 | null {
@@ -514,6 +525,8 @@ export default function App() {
   const cameraFrameRef = useRef<HTMLDivElement>(null);
   const liveAudioPlayerRef = useRef(createLiveAudioPlayer());
   const liveKickoffPendingRef = useRef(false);
+  const liveReconnectAttemptsRef = useRef(0);
+  const liveReconnectTimerRef = useRef<number | null>(null);
   const forceNewLiveMessageRef = useRef(false);
   const lastServerTranscriptAtRef = useRef(0);
   const lastLocalTranscriptRef = useRef<{ text: string; at: number }>({
@@ -939,6 +952,11 @@ export default function App() {
   }, [interrogationMode, liveConnected, liveStatus]);
 
   const stopVoiceInterrogation = () => {
+    if (liveReconnectTimerRef.current !== null) {
+      window.clearTimeout(liveReconnectTimerRef.current);
+      liveReconnectTimerRef.current = null;
+    }
+    liveReconnectAttemptsRef.current = 0;
     liveKickoffPendingRef.current = false;
     liveAudioPlayerRef.current?.stop();
     stopLive();
@@ -977,6 +995,82 @@ export default function App() {
   }, [currentScreen]);
 
   useEffect(() => {
+    if (liveConnected) {
+      liveReconnectAttemptsRef.current = 0;
+      if (liveReconnectTimerRef.current !== null) {
+        window.clearTimeout(liveReconnectTimerRef.current);
+        liveReconnectTimerRef.current = null;
+      }
+    }
+  }, [liveConnected]);
+
+  useEffect(() => {
+    return () => {
+      if (liveReconnectTimerRef.current !== null) {
+        window.clearTimeout(liveReconnectTimerRef.current);
+        liveReconnectTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!liveError) return;
+    if (interrogationMode !== 'voice') return;
+    if (!persona) return;
+    if (!isTransientLiveError(liveError)) return;
+    if (currentScreenRef.current !== 'interrogation') return;
+
+    const attempt = liveReconnectAttemptsRef.current;
+    if (attempt >= LIVE_RECONNECT_MAX_ATTEMPTS) {
+      stopVoiceInterrogation();
+      setInterrogationMode('text');
+      setMessages(prev => {
+        const notice =
+          'Voice service is temporarily unavailable. Switched to text interrogation so you can continue the case.';
+        const alreadyAdded = prev.some(
+          m => m.role === 'witness' && m.text === notice
+        );
+        if (alreadyAdded) return prev;
+        return [...prev, { role: 'witness', text: notice }];
+      });
+      return;
+    }
+
+    const delay = LIVE_RECONNECT_BASE_DELAY_MS * (attempt + 1);
+    liveReconnectAttemptsRef.current = attempt + 1;
+    if (liveReconnectTimerRef.current !== null) {
+      window.clearTimeout(liveReconnectTimerRef.current);
+      liveReconnectTimerRef.current = null;
+    }
+
+    liveReconnectTimerRef.current = window.setTimeout(() => {
+      if (currentScreenRef.current !== 'interrogation') return;
+      liveKickoffPendingRef.current = true;
+      startLive(
+        {
+          name: persona.name,
+          archetype: persona.archetype,
+          age: persona.age,
+          occupation: persona.occupation,
+          tells: persona.tells,
+          openingStatement: persona.openingStatement,
+          guiltyOf: persona.guiltyOf,
+          secret: persona.secret,
+        },
+        detections.map(d => d.label),
+        true
+      );
+    }, delay);
+  }, [
+    liveError,
+    interrogationMode,
+    persona,
+    detections,
+    startLive,
+    stopVoiceInterrogation,
+  ]);
+
+  useEffect(() => {
     if (!liveError) return;
     const normalized = liveError.toLowerCase();
     const isModelAvailabilityIssue =
@@ -1010,6 +1104,11 @@ export default function App() {
     setCurrentScreen('interrogation');
 
     if (interrogationMode === 'voice') {
+      liveReconnectAttemptsRef.current = 0;
+      if (liveReconnectTimerRef.current !== null) {
+        window.clearTimeout(liveReconnectTimerRef.current);
+        liveReconnectTimerRef.current = null;
+      }
       liveKickoffPendingRef.current = true;
       forceNewLiveMessageRef.current = true;
       startLive(
@@ -2785,6 +2884,11 @@ export default function App() {
                           stopLive();
                           return;
                         }
+                        liveReconnectAttemptsRef.current = 0;
+                        if (liveReconnectTimerRef.current !== null) {
+                          window.clearTimeout(liveReconnectTimerRef.current);
+                          liveReconnectTimerRef.current = null;
+                        }
                         liveKickoffPendingRef.current = true;
                         startLive(
                           {
@@ -2853,41 +2957,43 @@ export default function App() {
                   MAKE ACCUSATION
                 </button>
               </div>
-              <div className="relative">
-                <input
-                  type="text"
-                  value={userInput}
-                  onChange={e => setUserInput(e.target.value)}
-                  onKeyPress={e => {
-                    if (e.key !== 'Enter') return;
-                    if (liveConnected && userInput.trim()) {
-                      sendLiveUserText(userInput);
-                      setUserInput('');
-                    } else if (!liveConnected) sendMessage();
-                  }}
-                  placeholder={
-                    liveConnected
-                      ? 'Ask the witness (or speak)...'
-                      : 'Ask the witness...'
-                  }
-                  className="w-full bg-bg border border-border px-4 py-3 font-serif text-sm text-ink placeholder:text-ink4 focus:outline-none focus:border-red-noir/50 transition-all"
-                />
-                <button
-                  onClick={() => {
-                    if (liveConnected) {
-                      if (userInput.trim()) {
+              {interrogationMode === 'text' && (
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={userInput}
+                    onChange={e => setUserInput(e.target.value)}
+                    onKeyPress={e => {
+                      if (e.key !== 'Enter') return;
+                      if (liveConnected && userInput.trim()) {
                         sendLiveUserText(userInput);
-                      }
-                      setUserInput('');
-                    } else {
-                      sendMessage();
+                        setUserInput('');
+                      } else if (!liveConnected) sendMessage();
+                    }}
+                    placeholder={
+                      liveConnected
+                        ? 'Ask the witness (or speak)...'
+                        : 'Ask the witness...'
                     }
-                  }}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[9px] tracking-[2px] text-red-noir px-3 py-1"
-                >
-                  SEND
-                </button>
-              </div>
+                    className="w-full bg-bg border border-border px-4 py-3 font-serif text-sm text-ink placeholder:text-ink4 focus:outline-none focus:border-red-noir/50 transition-all"
+                  />
+                  <button
+                    onClick={() => {
+                      if (liveConnected) {
+                        if (userInput.trim()) {
+                          sendLiveUserText(userInput);
+                        }
+                        setUserInput('');
+                      } else {
+                        sendMessage();
+                      }
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[9px] tracking-[2px] text-red-noir px-3 py-1"
+                  >
+                    SEND
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Contradiction Modal */}
@@ -3688,32 +3794,32 @@ export default function App() {
                 <div className="flex-1" />
               </div>
 
-              {showProceed && (
+              {caseFile && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="mt-4"
                 >
                   <button
-                    onClick={handleMeetWitness}
-                    className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
+                    onClick={() => navigateToScreen('casefile')}
+                    className="w-full font-mono text-[10px] tracking-[3px] text-ink border border-border py-3 active:bg-surface2 transition-all uppercase"
                   >
-                    MEET THE WITNESS →
+                    OPEN CASE FILE
                   </button>
                 </motion.div>
               )}
 
-              {caseFile && (
+              {showProceed && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="mt-3"
                 >
                   <button
-                    onClick={() => navigateToScreen('casefile')}
-                    className="w-full font-mono text-[10px] tracking-[3px] text-ink border border-border py-3 active:bg-surface2 transition-all uppercase"
+                    onClick={handleMeetWitness}
+                    className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
                   >
-                    OPEN CASE FILE
+                    MEET THE WITNESS →
                   </button>
                 </motion.div>
               )}

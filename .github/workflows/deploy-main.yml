@@ -1,0 +1,76 @@
+name: Deploy On Main
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-central1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth for gcloud builds
+        run: gcloud auth configure-docker --quiet
+
+      - name: Deploy Node backend (Cloud Run)
+        run: gcloud builds submit --config=cloudbuild.yaml .
+
+      - name: Deploy live backend (Cloud Run)
+        run: gcloud builds submit --config=cloudbuild-live.yaml .
+
+      - name: Resolve deployed service URLs
+        run: |
+          BACKEND_URL="$(gcloud run services describe witness-backend --region "$REGION" --format='value(status.url)')"
+          LIVE_HTTP_URL="$(gcloud run services describe witness-live --region "$REGION" --format='value(status.url)')"
+          LIVE_WS_URL="wss://${LIVE_HTTP_URL#https://}/live"
+
+          echo "VITE_API_BASE_URL=$BACKEND_URL" >> "$GITHUB_ENV"
+          echo "VITE_LIVE_WS_URL=$LIVE_WS_URL" >> "$GITHUB_ENV"
+
+          echo "Backend URL: $BACKEND_URL"
+          echo "Live WS URL: $LIVE_WS_URL"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend for production
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: ${{ env.VITE_API_BASE_URL }}
+          VITE_LIVE_WS_URL: ${{ env.VITE_LIVE_WS_URL }}
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Firebase Hosting
+        run: firebase deploy --only hosting --project "$PROJECT_ID" --non-interactive

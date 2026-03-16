@@ -127,6 +127,15 @@ function isLikelyEnglishText(text: string): boolean {
   return latinLetters.length / letters.length >= 0.85;
 }
 
+function isTransientLiveOutage(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return (
+    normalized.includes('service is currently unavailable') ||
+    normalized.includes('service unavailable') ||
+    normalized.includes('1011')
+  );
+}
+
 const META_PHRASES = [
   "i'm taking on",
   "i've formulated",
@@ -817,7 +826,19 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
             const message =
               typeof data.message === 'string' ? data.message : 'Unknown error';
             const detail = typeof data.detail === 'string' ? data.detail : '';
-            setError(detail ? `${message}: ${detail}` : message);
+            const hint = typeof data.hint === 'string' ? data.hint : '';
+            const retryable = data.retryable === true;
+            const combined = [message, detail, hint]
+              .filter(Boolean)
+              .join(' | ');
+            if (retryable || isTransientLiveOutage(combined)) {
+              setError(
+                hint ||
+                  'Voice service is temporarily unavailable right now. Please retry in a few seconds.'
+              );
+            } else {
+              setError(detail ? `${message}: ${detail}` : message);
+            }
             return;
           }
 
@@ -1049,7 +1070,11 @@ export function useWitnessLive(options: UseWitnessLiveOptions = {}) {
       };
 
       ws.onerror = () => {
-        setError(prev => prev ?? 'WebSocket connection failed');
+        setError(
+          prev =>
+            prev ??
+            'WebSocket connection failed before voice session was ready.'
+        );
       };
 
       ws.onclose = () => {

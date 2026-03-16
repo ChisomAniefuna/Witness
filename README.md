@@ -170,6 +170,24 @@ firebase deploy --only hosting --project witness-489710
 - Node backend: https://witness-backend-640883260430.us-central1.run.app
 - Live backend: https://witness-live-640883260430.us-central1.run.app
 
+### Automated Deploy On Push To Main
+
+This repository now includes CI/CD automation that deploys backend, live backend, and frontend whenever code is pushed to `main`.
+
+- Workflow: [.github/workflows/deploy-main.yml](.github/workflows/deploy-main.yml)
+- Setup guide: [docs/auto-deploy-main.md](docs/auto-deploy-main.md)
+- One-command GCP setup script: [scripts/setup_github_oidc_deploy.sh](scripts/setup_github_oidc_deploy.sh)
+
+Bootstrap the Google side for GitHub OIDC:
+
+```bash
+PROJECT_ID=witness-489710 GITHUB_REPO=OWNER/REPO ./scripts/setup_github_oidc_deploy.sh
+```
+
+For Devpost bonus proof, link directly to:
+
+- [.github/workflows/deploy-main.yml](.github/workflows/deploy-main.yml)
+
 ---
 
 ## Project Structure
