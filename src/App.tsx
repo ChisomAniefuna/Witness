@@ -83,6 +83,7 @@ const WITNESS_LOADING_RULES = [
 ];
 
 const WITNESS_RULE_SCROLL_MS = 7000;
+const WITNESS_END_FADE_MS = 500;
 
 interface PersistedStateV1 {
   version: 1;
@@ -443,6 +444,7 @@ export default function App() {
   const witnessTypeAudioCtxRef = useRef<AudioContext | null>(null);
   const typedStatementForRef = useRef('');
   const pendingPersonaRef = useRef<WitnessPersona | null>(null);
+  const isWitnessRuleScrollDoneRef = useRef(false);
 
   const commitWitnessPersona = (nextPersona: WitnessPersona) => {
     setPersona(nextPersona);
@@ -450,6 +452,13 @@ export default function App() {
     setLastMessageTime(Date.now());
     setIsGeneratingPersona(false);
     pendingPersonaRef.current = null;
+  };
+
+  const queueOrCommitWitnessPersona = (nextPersona: WitnessPersona) => {
+    pendingPersonaRef.current = nextPersona;
+    if (isWitnessRuleScrollDoneRef.current) {
+      commitWitnessPersona(nextPersona);
+    }
   };
 
   const upsertLiveTranscript = (
@@ -959,6 +968,7 @@ export default function App() {
 
   const handleMeetWitness = async () => {
     setIsGeneratingPersona(true);
+    isWitnessRuleScrollDoneRef.current = false;
     setIsWitnessRuleScrollDone(false);
     setPersona(null);
     setMessages([]);
@@ -967,11 +977,7 @@ export default function App() {
     setCurrentScreen('witness');
     try {
       const p = await generateWitnessPersona(detections.map(d => d.label));
-      if (isWitnessRuleScrollDone) {
-        commitWitnessPersona(p);
-      } else {
-        pendingPersonaRef.current = p;
-      }
+      queueOrCommitWitnessPersona(p);
     } catch (err) {
       console.error('Persona generation error:', err);
       // Fallback persona
@@ -986,11 +992,7 @@ export default function App() {
         guiltyOf: 'Accidental Manslaughter',
         secret: 'He was sleeping on the job when the crime occurred.',
       };
-      if (isWitnessRuleScrollDone) {
-        commitWitnessPersona(fallback);
-      } else {
-        pendingPersonaRef.current = fallback;
-      }
+      queueOrCommitWitnessPersona(fallback);
     } finally {
       // Loading exits only after both generation is done and rule-scroll is complete.
     }
@@ -1005,6 +1007,7 @@ export default function App() {
   }, [currentScreen, isGeneratingPersona]);
 
   useEffect(() => {
+    isWitnessRuleScrollDoneRef.current = isWitnessRuleScrollDone;
     if (!isWitnessRuleScrollDone) return;
     if (!pendingPersonaRef.current) return;
     commitWitnessPersona(pendingPersonaRef.current);
@@ -1436,6 +1439,20 @@ export default function App() {
             <div className="absolute bottom-6 left-1/2 -translate-x-1/2 font-mono text-[9px] tracking-[5px] text-ink4 uppercase">
               Locating witness profile...
             </div>
+
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{
+                duration: WITNESS_END_FADE_MS / 1000,
+                delay: Math.max(
+                  0,
+                  (WITNESS_RULE_SCROLL_MS - WITNESS_END_FADE_MS) / 1000
+                ),
+                ease: 'easeInOut',
+              }}
+              className="pointer-events-none absolute inset-0 z-40 bg-black"
+            />
           </motion.div>
         )}
 
