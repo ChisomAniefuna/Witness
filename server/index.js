@@ -187,6 +187,63 @@ app.post('/api/witness-persona', async (req, res) => {
   }
 });
 
+app.post('/api/casefile', async (req, res) => {
+  try {
+    const { objects } = req.body;
+    const model = 'gemini-2.5-flash';
+    const prompt = `
+      ROLE 0 — THE INITIAL CASE FILE
+      Create an official first responder document based on these objects found in a room: [${objects.join(
+        ', '
+      )}].
+
+      Return JSON exactly matching this structure:
+      {
+        "caseNumber": string,
+        "date": string,
+        "time": string,
+        "incidentType": string,
+        "victim": {
+          "name": string,
+          "age": number,
+          "occupation": string,
+          "discovery": string,
+          "condition": string
+        },
+        "sceneReport": string,
+        "witnessOnScene": {
+          "name": string,
+          "age": number,
+          "occupation": string,
+          "reason": string,
+          "demeanor": string
+        },
+        "assignedDate": string
+      }
+
+      RULES:
+      - sceneReport must be EXACTLY 4 sentences.
+      - Each sentence must link a detected object to the narrative.
+      - No supernatural elements or brand names.
+      - incidentType must be plain and clear.
+      ${PLAIN_LANGUAGE_RULES}
+    `;
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+      },
+    });
+
+    res.json(JSON.parse(response.text || '{}'));
+  } catch (err) {
+    console.error('casefile error', err);
+    res.status(500).json({ error: 'casefile failed' });
+  }
+});
+
 app.post('/api/interrogation', async (req, res) => {
   try {
     const { messages, persona, objects } = req.body;

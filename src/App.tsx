@@ -21,6 +21,7 @@ import {
 import {
   analyzeScene,
   generateWitnessPersona,
+  generateCaseFile,
   getInterrogationResponse,
   detectContradiction,
   checkSafety,
@@ -28,6 +29,7 @@ import {
   getAccusationOptions,
   evaluateAccusation,
   generateCaseFileTimeline,
+  CaseFile,
   WitnessPersona,
 } from './services/geminiService';
 import { useWitnessLive, createLiveAudioPlayer } from './hooks/useWitnessLive';
@@ -39,7 +41,8 @@ type Screen =
   | 'witness'
   | 'interrogation'
   | 'accusation'
-  | 'casefile';
+  | 'casefile'
+  | 'verdict';
 
 type InterrogationMode = 'text' | 'voice';
 
@@ -59,6 +62,7 @@ interface Message {
   isStreaming?: boolean;
   isContradiction?: boolean;
   contradictionQuote?: string;
+  id?: string;
 }
 
 interface AccusationOptions {
@@ -74,6 +78,7 @@ interface Verdict {
 }
 
 const STORAGE_KEY = 'witness_state_v1';
+const CAMERA_PERMISSION_KEY = 'witness_camera_permission_v1';
 
 const WITNESS_LOADING_RULES = [
   'Lead with one clear question.',
@@ -93,6 +98,7 @@ interface PersistedStateV1 {
   detections: DetectionObject[];
   showProceed: boolean;
   persona: WitnessPersona | null;
+  caseFile: CaseFile | null;
   messages: Message[];
   timeLeft: number;
   contradictionCount: number;
@@ -105,6 +111,7 @@ interface PersistedStateV1 {
   selectedMethod: string | null;
   verdict: Verdict | null;
   timeline: string[];
+  caseSignature: string | null;
 }
 
 function normalizeMessageText(text: string): string {
@@ -146,10 +153,17 @@ function resolveInitialScreen(persisted: PersistedStateV1 | null): Screen {
     persisted.messages.length > 0;
   const hasAccusation = !!persisted.accusationOptions;
   const hasVerdict = !!persisted.verdict;
+  const hasCaseFile = !!persisted.caseFile;
 
   switch (persisted.currentScreen) {
+    case 'verdict':
+      if (hasVerdict) return 'verdict';
+      if (hasAccusation) return 'accusation';
+      if (hasInterrogation) return 'interrogation';
+      if (hasPersona) return 'witness';
+      return hasCaseFile ? 'casefile' : hasScan ? 'camera' : 'splash';
     case 'casefile':
-      if (hasVerdict) return 'casefile';
+      if (hasCaseFile) return 'casefile';
       if (hasAccusation) return 'accusation';
       if (hasInterrogation) return 'interrogation';
       if (hasPersona) return 'witness';
@@ -377,6 +391,9 @@ export default function App() {
   const [persona, setPersona] = useState<WitnessPersona | null>(
     () => persistedState?.persona ?? null
   );
+  const [caseFile, setCaseFile] = useState<CaseFile | null>(
+    () => persistedState?.caseFile ?? null
+  );
   const [isGeneratingPersona, setIsGeneratingPersona] = useState(false);
   const [isWitnessRuleScrollDone, setIsWitnessRuleScrollDone] = useState(false);
   const [contradictionCount, setContradictionCount] = useState(
@@ -423,6 +440,10 @@ export default function App() {
   const [selectedMethod, setSelectedMethod] = useState<string | null>(
     () => persistedState?.selectedMethod ?? null
   );
+  const [activeEvidence, setActiveEvidence] = useState<string | null>(null);
+  const [caseSignature, setCaseSignature] = useState<string | null>(
+    () => persistedState?.caseSignature ?? null
+  );
   const [verdict, setVerdict] = useState<Verdict | null>(
     () => persistedState?.verdict ?? null
   );
@@ -430,6 +451,7 @@ export default function App() {
     () => persistedState?.timeline ?? []
   );
   const [isSafetyFlagged, setIsSafetyFlagged] = useState(false);
+  const [isEvaluating, setIsEvaluating] = useState(false);
   const [detectiveName, setDetectiveName] = useState('');
   const [typedOpeningStatement, setTypedOpeningStatement] = useState('');
   const [isWitnessTyping, setIsWitnessTyping] = useState(false);
@@ -446,18 +468,211 @@ export default function App() {
   const pendingPersonaRef = useRef<WitnessPersona | null>(null);
   const isWitnessRuleScrollDoneRef = useRef(false);
 
+  const AVATAR_STORAGE_URL_KEY = 'witness_avatar_url_v1';
+
+  const hashString = (input: string) => {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i += 1) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  };
+
+  const buildDeterministicAvatarUrl = (signature: string) => {
+    const hash = hashString(signature);
+    const gender = hash % 2 === 0 ? 'women' : 'men';
+    const index = hash % 100;
+    return `https://randomuser.me/api/portraits/${gender}/${index}.jpg`;
+  };
+
+  const getPersonaSignature = (persona: WitnessPersona) => {
+    const name = persona.name?.trim() || 'unknown';
+    const age = Number.isFinite(persona.age) ? String(persona.age) : 'na';
+    const occupation = persona.occupation?.trim() || 'unknown';
+    const archetype = persona.archetype?.trim() || 'unknown';
+    const opening = persona.openingStatement?.trim() || 'unknown';
+    return `${name}|${age}|${occupation}|${archetype}|${opening}`;
+  };
+
+  const buildCaseSignatureFromLabels = (labels: string[]) => {
+    if (!labels.length) return 'no-evidence';
+    return labels.map(l => l.trim().toLowerCase()).sort().join('|');
+  };
+
+  const getEvidenceSignature = () => {
+    if (caseSignature) return caseSignature;
+    return buildCaseSignatureFromLabels(detections.map(d => d.label));
+  };
+
+  const getAvatarSignature = (persona: WitnessPersona) => {
+    const evidenceSig = getEvidenceSignature();
+    if (evidenceSig !== 'no-evidence') return `evidence:${evidenceSig}`;
+    return `persona:${getPersonaSignature(persona)}`;
+  };
+
+  const readStoredAvatar = () => {
+    try {
+      const storedUrl = localStorage.getItem(AVATAR_STORAGE_URL_KEY);
+      return storedUrl || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const storeAvatar = (url: string) => {
+    try {
+      localStorage.setItem(AVATAR_STORAGE_URL_KEY, url);
+    } catch {}
+  };
+
+  const ensurePersonaAvatar = (nextPersona: WitnessPersona): WitnessPersona => {
+    if (nextPersona.avatarUrl) {
+      storeAvatar(nextPersona.avatarUrl);
+      return nextPersona;
+    }
+    const stored = readStoredAvatar();
+    if (stored) return { ...nextPersona, avatarUrl: stored };
+    const signature = getAvatarSignature(nextPersona);
+    const fresh = buildDeterministicAvatarUrl(signature);
+    storeAvatar(fresh);
+    return { ...nextPersona, avatarUrl: fresh };
+  };
+
   const commitWitnessPersona = (nextPersona: WitnessPersona) => {
-    setPersona(nextPersona);
-    setMessages([{ role: 'witness', text: nextPersona.openingStatement }]);
+    const personaWithAvatar = ensurePersonaAvatar(nextPersona);
+    setPersona(personaWithAvatar);
+    setMessages([{ role: 'witness', text: personaWithAvatar.openingStatement }]);
     setLastMessageTime(Date.now());
     setIsGeneratingPersona(false);
     pendingPersonaRef.current = null;
   };
 
   const queueOrCommitWitnessPersona = (nextPersona: WitnessPersona) => {
-    pendingPersonaRef.current = nextPersona;
+    const personaWithAvatar = ensurePersonaAvatar(nextPersona);
+    pendingPersonaRef.current = personaWithAvatar;
     if (isWitnessRuleScrollDoneRef.current) {
-      commitWitnessPersona(nextPersona);
+      commitWitnessPersona(personaWithAvatar);
+    }
+  };
+
+  const readCameraPermission = () => {
+    try {
+      return localStorage.getItem(CAMERA_PERMISSION_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  };
+
+  const writeCameraPermission = (granted: boolean) => {
+    try {
+      localStorage.setItem(CAMERA_PERMISSION_KEY, String(granted));
+    } catch {}
+  };
+
+  const formatCaseDate = (date: Date) =>
+    date.toLocaleDateString('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    });
+
+  const formatCaseTime = (date: Date) =>
+    date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+  const buildFallbackCaseFile = (labels: string[]): CaseFile => {
+    const now = new Date();
+    const seedSource = labels.join('|') || 'casefile';
+    const seed = hashString(seedSource);
+    const caseNumber = String((seed % 9000) + 1000).padStart(4, '0');
+
+    const firstNames = [
+      'Avery',
+      'Jordan',
+      'Noah',
+      'Maya',
+      'Priya',
+      'Luis',
+      'Hana',
+      'Omar',
+      'Lea',
+      'Gabriel',
+    ];
+    const lastNames = [
+      'Singh',
+      'Park',
+      'Diaz',
+      'Okoro',
+      'Mori',
+      'Ivanov',
+      'Patel',
+      'Khan',
+      'Reed',
+      'Alvarez',
+    ];
+    const occupations = [
+      'Teacher',
+      'Paramedic',
+      'Accountant',
+      'Security Guard',
+      'Nurse',
+      'Mechanic',
+      'Archivist',
+      'Courier',
+      'Analyst',
+      'Caretaker',
+    ];
+
+    const pick = <T,>(arr: T[], offset: number) =>
+      arr[(seed + offset) % arr.length];
+    const victimName = `${pick(firstNames, 3)} ${pick(lastNames, 5)}`;
+    const witnessName = `${pick(firstNames, 7)} ${pick(lastNames, 9)}`;
+
+    const l0 = labels[0]?.toLowerCase() || 'main object';
+    const l1 = labels[1]?.toLowerCase() || l0;
+    const l2 = labels[2]?.toLowerCase() || l0;
+
+    return {
+      caseNumber,
+      date: formatCaseDate(now),
+      time: formatCaseTime(now),
+      incidentType: labels.length
+        ? `Reported incident involving the ${l0}.`
+        : 'Reported incident under investigation.',
+      victim: {
+        name: victimName,
+        age: 24 + (seed % 32),
+        occupation: pick(occupations, 11),
+        discovery: `Found near the ${l0} with signs of a sudden disturbance.`,
+        condition: 'Unresponsive',
+      },
+      sceneReport: `Responders documented a disturbance centered on the ${l0}. A ${l1} was found out of position relative to the rest of the room. The ${l2} suggests the event was hurried and unplanned. One detail involving the ${l0} still does not align with the rest of the scene.`,
+      witnessOnScene: {
+        name: witnessName,
+        age: 21 + (seed % 28),
+        occupation: pick(occupations, 17),
+        reason: 'Reported hearing a loud impact and checked the room.',
+        demeanor: 'Cooperative and calm. Asked to leave soon after.',
+      },
+      assignedDate: `${formatCaseDate(now)}, ${formatCaseTime(now)}`,
+    };
+  };
+
+  const loadCaseFileForObjects = async (labels: string[]) => {
+    if (!labels.length) return;
+    try {
+      const cf = await generateCaseFile(labels);
+      if (cf && cf.caseNumber) {
+        setCaseFile(cf);
+        return;
+      }
+      setCaseFile(buildFallbackCaseFile(labels));
+    } catch (err) {
+      console.error('Case file error:', err);
+      setCaseFile(buildFallbackCaseFile(labels));
     }
   };
 
@@ -657,6 +872,10 @@ export default function App() {
       return;
     }
 
+    if (persona && !persona.avatarUrl) {
+      setPersona(ensurePersonaAvatar(persona));
+    }
+
     if (currentScreen !== 'witness') {
       setTypedOpeningStatement(persona.openingStatement);
       setIsWitnessTyping(false);
@@ -777,6 +996,14 @@ export default function App() {
   }, [isDark]);
 
   useEffect(() => {
+    if (!caseSignature && detections.length) {
+      setCaseSignature(
+        buildCaseSignatureFromLabels(detections.map(d => d.label))
+      );
+    }
+  }, [caseSignature, detections]);
+
+  useEffect(() => {
     persistState({
       version: 1,
       savedAt: Date.now(),
@@ -785,6 +1012,7 @@ export default function App() {
       detections,
       showProceed,
       persona,
+      caseFile,
       messages,
       timeLeft,
       contradictionCount,
@@ -797,6 +1025,7 @@ export default function App() {
       selectedMethod,
       verdict,
       timeline,
+      caseSignature,
     });
   }, [
     currentScreen,
@@ -804,6 +1033,7 @@ export default function App() {
     detections,
     showProceed,
     persona,
+    caseFile,
     messages,
     timeLeft,
     contradictionCount,
@@ -816,6 +1046,7 @@ export default function App() {
     selectedMethod,
     verdict,
     timeline,
+    caseSignature,
   ]);
 
   const startCamera = async () => {
@@ -832,10 +1063,12 @@ export default function App() {
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
         setCameraStatus('live');
+        writeCameraPermission(true);
       }
     } catch (err) {
       console.error('Camera error:', err);
       setCameraStatus('denied');
+      writeCameraPermission(false);
     }
   };
 
@@ -848,12 +1081,52 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (currentScreen === 'camera') {
-      startCamera();
-    } else {
+    let cancelled = false;
+
+    const prepareCamera = async () => {
+      if (currentScreen !== 'camera') {
+        stopCamera();
+        return;
+      }
+
+      const storedGranted = readCameraPermission();
+      const canQuery = typeof navigator !== 'undefined' &&
+        'permissions' in navigator &&
+        typeof navigator.permissions.query === 'function';
+
+      if (canQuery) {
+        try {
+          const status = await navigator.permissions.query({
+            name: 'camera' as PermissionName,
+          });
+          if (cancelled) return;
+          if (status.state === 'granted') {
+            startCamera();
+            return;
+          }
+          if (status.state === 'denied') {
+            setCameraStatus('denied');
+            return;
+          }
+        } catch {
+          // Fall through to stored permission check.
+        }
+      }
+
+      if (storedGranted) {
+        startCamera();
+        return;
+      }
+
+      setCameraStatus('idle');
+    };
+
+    prepareCamera();
+
+    return () => {
+      cancelled = true;
       stopCamera();
-    }
-    return () => stopCamera();
+    };
   }, [currentScreen]);
 
   useEffect(() => {
@@ -911,13 +1184,18 @@ export default function App() {
     setIsScanning(true);
     setShowProceed(false);
     setDetections([]);
+    setCaseFile(null);
     setAnalysisError(false);
     setWitnessQuote(null);
 
     try {
       const result = await analyzeScene(imageData);
       setDetections(result.objects);
+      setCaseSignature(
+        buildCaseSignatureFromLabels(result.objects.map(obj => obj.label))
+      );
       setWitnessQuote(result.witnessReaction);
+      loadCaseFileForObjects(result.objects.map(obj => obj.label));
 
       setIsScanning(false);
       setShowProceed(true);
@@ -957,9 +1235,13 @@ export default function App() {
         },
       ];
       setDetections(mockDetections);
+      setCaseSignature(
+        buildCaseSignatureFromLabels(mockDetections.map(obj => obj.label))
+      );
       const fallbackQuote =
         "I... I shouldn't have come back here. The air feels heavy with what happened.";
       setWitnessQuote(fallbackQuote);
+      loadCaseFileForObjects(mockDetections.map(obj => obj.label));
 
       setIsScanning(false);
       setShowProceed(true);
@@ -1015,6 +1297,60 @@ export default function App() {
     commitWitnessPersona(pendingPersonaRef.current);
   }, [isWitnessRuleScrollDone]);
 
+  const typeOutWitnessResponse = (
+    text: string,
+    meta?: {
+      isContradiction?: boolean;
+      contradictionQuote?: string;
+      onComplete?: () => void;
+    }
+  ) => {
+    const id =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `w_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const total = text.length;
+    const step = Math.max(1, Math.ceil(total / 120));
+    let index = 0;
+
+    setMessages(prev => [
+      ...prev,
+      { id, role: 'witness', text: '', isStreaming: true },
+    ]);
+
+    const interval = window.setInterval(() => {
+      index = Math.min(total, index + step);
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === id
+            ? { ...msg, text: text.slice(0, index), isStreaming: index < total }
+            : msg
+        )
+      );
+
+      if (index >= total) {
+        window.clearInterval(interval);
+        if (meta?.isContradiction) {
+          setContradictionCount(c => c + 1);
+        }
+        if (meta?.isContradiction || meta?.contradictionQuote) {
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === id
+                ? {
+                    ...msg,
+                    isContradiction: meta?.isContradiction,
+                    contradictionQuote: meta?.contradictionQuote,
+                  }
+                : msg
+            )
+          );
+        }
+        meta?.onComplete?.();
+      }
+    }, 18);
+  };
+
   const sendMessage = async () => {
     if (!userInput.trim() || isInterrogating || !persona) return;
 
@@ -1054,11 +1390,9 @@ export default function App() {
       if (shortMessageCount >= 2) {
         setShortMessageCount(0);
         const engagementResponse = await getEngagementResponse(persona);
-        setMessages(prev => [
-          ...prev,
-          { role: 'witness', text: engagementResponse },
-        ]);
-        setIsInterrogating(false);
+        typeOutWitnessResponse(engagementResponse, {
+          onComplete: () => setIsInterrogating(false),
+        });
         return;
       }
 
@@ -1075,29 +1409,18 @@ export default function App() {
         ...newMessages,
         { role: 'witness', text: response },
       ]);
-
-      let finalMsg: Message = { role: 'witness', text: response };
-
-      if (contradictionCheck.contradiction) {
-        finalMsg.isContradiction = true;
-        finalMsg.contradictionQuote = contradictionCheck.quote;
-        // We don't increment counter here, we increment when the user TAPS it (as per "catching" them)
-        // Actually, prompt says "increment the contradiction counter in the header bar" when it fires.
-        setContradictionCount(prev => prev + 1);
-      }
-
-      setMessages(prev => [...prev, finalMsg]);
+      typeOutWitnessResponse(response, {
+        isContradiction: contradictionCheck.contradiction,
+        contradictionQuote: contradictionCheck.quote,
+        onComplete: () => setIsInterrogating(false),
+      });
     } catch (err) {
       console.error('Interrogation error:', err);
-      setMessages(prev => [
-        ...prev,
-        {
-          role: 'witness',
-          text: "I... I can't remember. My head is spinning.",
-        },
-      ]);
+      typeOutWitnessResponse("I... I can't remember. My head is spinning.", {
+        onComplete: () => setIsInterrogating(false),
+      });
     } finally {
-      setIsInterrogating(false);
+      // handled by typeOutWitnessResponse
     }
   };
 
@@ -1128,8 +1451,9 @@ export default function App() {
   const handleSubmitVerdict = async () => {
     if (!selectedSuspect || !selectedMotive || !selectedMethod || !persona)
       return;
-
-    navigateToScreen('casefile');
+    setIsEvaluating(true);
+    const startedAt = Date.now();
+    let success = false;
     try {
       const res = await evaluateAccusation(
         {
@@ -1151,8 +1475,18 @@ export default function App() {
         detections.map(d => d.label)
       );
       setTimeline(t);
+      success = true;
     } catch (err) {
       console.error('Verdict error:', err);
+    } finally {
+      const elapsed = Date.now() - startedAt;
+      const wait = Math.max(0, 1200 - elapsed);
+      window.setTimeout(() => {
+        setIsEvaluating(false);
+        if (success) {
+          navigateToScreen('verdict');
+        }
+      }, wait);
     }
   };
 
@@ -1160,13 +1494,63 @@ export default function App() {
   const hasPersona = !!persona;
   const hasInterrogation = !!persona && messages.length > 0;
   const hasAccusation = !!accusationOptions;
+  const hasCaseFile = !!caseFile;
   const hasVerdict = !!verdict;
+  const isCaseFileActive =
+    currentScreen === 'casefile' || currentScreen === 'verdict';
+  const testimonyReview = (() => {
+    const witnessMessages = messages.filter(
+      msg => msg.role === 'witness' && !msg.isStreaming
+    );
+    if (!witnessMessages.length) return [];
+    const flaggedLabels = detections
+      .filter(obj => obj.flagged)
+      .map(obj => obj.label.toLowerCase());
+    return witnessMessages.slice(-3).map(msg => {
+      const rawQuote = msg.contradictionQuote || msg.text;
+      const cleanedQuote = rawQuote.replace(/^\"+|\"+$/g, '').trim() || rawQuote;
+      const lowered = cleanedQuote.toLowerCase();
+      const isCritical = flaggedLabels.some(
+        label => label && lowered.includes(label)
+      );
+      const status = msg.isContradiction
+        ? 'CONTRADICTION'
+        : isCritical
+          ? 'CRITICAL'
+          : 'VERIFIED';
+      return { quote: cleanedQuote, status };
+    });
+  })();
 
   return (
     <div
       className={`w-full h-full flex flex-col ${isDark ? 'bg-bg text-ink' : 'bg-bg text-ink'}`}
     >
       <AnimatePresence mode="wait">
+        {isEvaluating && (
+          <motion.div
+            key="evaluating"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-bg"
+          >
+            <div className="relative">
+              <div className="w-24 h-24 border-2 border-red-noir/20 rounded-full animate-ping" />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Scale className="w-8 h-8 text-red-noir animate-pulse" />
+              </div>
+            </div>
+            <div className="mt-12 text-center">
+              <div className="font-mono text-[10px] tracking-[6px] text-red-noir uppercase mb-2">
+                Analyzing Theory
+              </div>
+              <div className="font-serif text-sm text-ink4 italic">
+                Consulting official records...
+              </div>
+            </div>
+          </motion.div>
+        )}
         {currentScreen === 'splash' && (
           <motion.div
             key="splash"
@@ -1175,65 +1559,101 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-bg overflow-hidden"
           >
-            {/* Background Texture */}
+            {/* Background Texture & Vignette */}
             <div className="absolute inset-0 z-0 opacity-[0.03] pointer-events-none bg-[url('https://www.transparenttextures.com/patterns/pinstripe.png')]" />
+            <div className="absolute inset-0 z-0 bg-radial from-transparent via-transparent to-black/20 pointer-events-none" />
 
             {/* Massive Background Typography */}
             <div className="absolute inset-0 z-0 flex items-center justify-center pointer-events-none select-none overflow-hidden">
               <motion.h1
                 initial={{ scale: 1.5, opacity: 0 }}
-                animate={{ scale: 1, opacity: 0.04 }}
-                transition={{ duration: 1.2, ease: 'easeOut' }}
-                className="font-display text-[45vw] text-ink leading-none tracking-tighter rotate-[-10deg] translate-y-[-5%]"
+                animate={{ scale: 1, opacity: 0.03 }}
+                transition={{ duration: 1.5, ease: 'easeOut' }}
+                className="font-display text-[50vw] text-ink leading-none tracking-tighter rotate-[-12deg] translate-y-[-10%]"
               >
-                WITNESS
+                NOIR
               </motion.h1>
             </div>
 
+            {/* Top Bar Labels */}
+            <div className="absolute top-0 left-0 w-full p-8 flex justify-between items-start z-30">
+              <div className="flex flex-col gap-1">
+                <div className="font-mono text-[8px] tracking-[4px] text-red-noir uppercase">
+                  Project // Witness
+                </div>
+                <div className="font-mono text-[7px] tracking-[2px] text-ink4 uppercase opacity-50">
+                  v2.5.0_PROD
+                </div>
+              </div>
+              <div className="flex items-center gap-6">
+                <button
+                  onClick={() => setIsMuted(!isMuted)}
+                  className="text-ink4 hover:text-red-noir transition-colors"
+                  aria-label={isMuted ? 'Unmute audio' : 'Mute audio'}
+                >
+                  {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                </button>
+                <button
+                  onClick={toggleTheme}
+                  className="text-ink4 hover:text-red-noir transition-colors"
+                  aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+                >
+                  {isDark ? <Sun size={16} /> : <Moon size={16} />}
+                </button>
+              </div>
+            </div>
+
             {/* Main Content */}
-            <div className="relative z-20 flex flex-col items-center text-center max-w-lg px-6">
+            <div className="relative z-20 flex flex-col items-center text-center max-w-lg px-8">
               <motion.div
                 initial={{ y: 20, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ delay: 0.2 }}
-                className="w-14 h-14 rounded-full border border-red-noir/30 flex items-center justify-center mb-12 relative"
+                className="w-16 h-16 rounded-full border border-red-noir/20 flex items-center justify-center mb-12 relative"
               >
-                <div className="w-2 h-2 rounded-full bg-red-noir animate-pulse" />
-                <div className="absolute inset-[-10px] rounded-full border border-red-noir/10 animate-ping [animation-duration:4s]" />
+                <div className="w-2.5 h-2.5 rounded-full bg-red-noir animate-pulse shadow-[0_0_15px_rgba(155,35,24,0.5)]" />
+                <div className="absolute inset-[-12px] rounded-full border border-red-noir/5 animate-ping [animation-duration:5s]" />
               </motion.div>
 
               <motion.div
                 initial={{ y: 40, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.4, duration: 0.8, ease: 'circOut' }}
+                transition={{ delay: 0.4, duration: 1, ease: [0.16, 1, 0.3, 1] }}
               >
-                <h1 className="font-display text-[clamp(72px,18vw,140px)] text-ink tracking-tighter leading-[0.8] mb-10 uppercase">
+                <h1 className="font-display text-[clamp(80px,20vw,160px)] text-ink tracking-tighter leading-[0.75] mb-12 uppercase">
                   WITNESS
                 </h1>
-                <div className="h-px w-32 bg-red-noir/40 mx-auto mb-10" />
-                <p className="font-serif text-[clamp(18px,5vw,24px)] italic font-light text-ink2 leading-relaxed mb-16 max-w-sm mx-auto text-center">
-                  "The room remembers what the eyes forget. Point your lens at
-                  the truth."
+                <div className="flex items-center gap-4 justify-center mb-12">
+                  <div className="h-px w-12 bg-red-noir/30" />
+                  <div className="font-mono text-[9px] tracking-[6px] text-red-noir uppercase">
+                    Case File #882
+                  </div>
+                  <div className="h-px w-12 bg-red-noir/30" />
+                </div>
+                <p className="font-serif text-[clamp(20px,5.5vw,26px)] italic font-light text-ink2 leading-relaxed mb-20 max-w-sm mx-auto text-center">
+                  "The room remembers what the eyes forget. Point your lens at the truth."
                 </p>
               </motion.div>
 
-              <motion.button
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.8 }}
-                onClick={() => setCurrentScreen('onboarding')}
-                className="group relative w-full max-w-xs font-display text-xs tracking-[8px] text-white uppercase bg-red-noir py-7 shadow-[0_25px_50px_rgba(155,35,24,0.3)] hover:shadow-[0_30px_60px_rgba(155,35,24,0.4)] active:scale-95 transition-all overflow-hidden"
-              >
-                <span className="relative z-10">BEGIN INVESTIGATION</span>
-                <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
-              </motion.button>
+              <div className="w-full max-w-xs space-y-8">
+                <motion.button
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.8 }}
+                  onClick={() => setCurrentScreen('onboarding')}
+                  className="group relative w-full font-display text-xs tracking-[8px] text-white uppercase bg-red-noir py-8 shadow-[0_30px_60px_rgba(155,35,24,0.25)] hover:shadow-[0_40px_80px_rgba(155,35,24,0.35)] active:scale-95 transition-all overflow-hidden"
+                >
+                  <span className="relative z-10">ENTER THE SCENE</span>
+                  <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                </motion.button>
+              </div>
             </div>
 
             {/* Corner Accents */}
-            <div className="absolute top-10 left-10 w-16 h-px bg-red-noir/20" />
-            <div className="absolute top-10 left-10 w-px h-16 bg-red-noir/20" />
-            <div className="absolute bottom-10 right-10 w-16 h-px bg-red-noir/20" />
-            <div className="absolute bottom-10 right-10 w-px h-16 bg-red-noir/20" />
+            <div className="absolute top-12 left-12 w-20 h-px bg-red-noir/10" />
+            <div className="absolute top-12 left-12 w-px h-20 bg-red-noir/10" />
+            <div className="absolute bottom-12 right-12 w-20 h-px bg-red-noir/10" />
+            <div className="absolute bottom-12 right-12 w-px h-20 bg-red-noir/10" />
           </motion.div>
         )}
 
@@ -1243,125 +1663,158 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-10 flex flex-col justify-end bg-bg2"
+            className="fixed inset-0 z-50 flex flex-col bg-bg overflow-y-auto"
           >
-            <div className="absolute inset-0 bottom-[40%] flex items-end justify-center overflow-hidden pointer-events-none">
-              <div className="absolute bottom-[15%] left-1/2 -translate-x-1/2 w-[clamp(180px,55vw,280px)] h-[clamp(180px,55vw,280px)] rounded-full bg-radial from-amber-noir/20 to-transparent" />
-              <svg
-                className="w-[clamp(260px,85vw,420px)] h-auto block"
-                viewBox="0 0 360 320"
+            {/* Header with Back Button */}
+            <div className="absolute top-0 left-0 w-full p-6 z-20 flex justify-between items-center">
+              <button
+                onClick={() => navigateToScreen('splash')}
+                className="flex items-center gap-2 font-mono text-[10px] tracking-[3px] text-ink4 hover:text-red-noir transition-colors group"
               >
-                <defs>
-                  <radialGradient id="og" cx="50%" cy="40%" r="55%">
-                    <stop offset="0%" stopColor="#e0a820" stopOpacity=".3" />
-                    <stop offset="100%" stopColor="#e0a820" stopOpacity="0" />
-                  </radialGradient>
-                  <linearGradient id="ig" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor="#e0a820" stopOpacity=".58" />
-                    <stop offset="100%" stopColor="#e0a820" stopOpacity=".03" />
-                  </linearGradient>
-                </defs>
-                <line
-                  x1="0"
-                  y1="295"
-                  x2="360"
-                  y2="295"
-                  stroke="#1a1610"
-                  strokeWidth="1"
-                />
-                <ellipse cx="180" cy="178" rx="110" ry="128" fill="url(#og)" />
-                <rect
-                  x="110"
-                  y="42"
-                  width="140"
-                  height="253"
-                  fill="#0a0805"
-                  stroke="#221c0a"
-                  strokeWidth="1.5"
-                />
-                <polygon
-                  points="110,42 148,47 148,291 110,291"
-                  fill="#0c0a06"
-                  stroke="#1c1608"
-                  strokeWidth="1"
-                />
-                <rect x="148" y="42" width="102" height="253" fill="url(#ig)" />
-                <polygon
-                  points="110,295 250,295 296,320 64,320"
-                  fill="#e0a820"
-                  opacity=".05"
-                />
-                <ellipse cx="199" cy="100" rx="14" ry="16" fill="#020201" />
-                <path
-                  d="M184 118 Q199 108 214 118 L220 145 Q199 138 178 145 Z"
-                  fill="#020201"
-                />
-                <rect x="184" y="143" width="30" height="112" fill="#020201" />
-                <path
-                  d="M184 150 L171 215 L180 217 L190 155 Z"
-                  fill="#020201"
-                />
-                <path
-                  d="M214 150 L227 211 L236 209 L225 148 Z"
-                  fill="#020201"
-                />
-                <path
-                  d="M184 253 L177 295 L188 295 L191 253 Z"
-                  fill="#020201"
-                />
-                <path
-                  d="M214 253 L221 295 L210 295 L207 253 Z"
-                  fill="#020201"
-                />
-                <ellipse
-                  cx="199"
-                  cy="295"
-                  rx="32"
-                  ry="5"
-                  fill="#010100"
-                  opacity=".7"
-                />
-              </svg>
+                <ChevronLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+                BACK
+              </button>
+              <div className="font-mono text-[8px] tracking-[4px] text-ink4/30 uppercase">
+                Section 01 // Induction
+              </div>
             </div>
 
-            <div className="relative z-10 bg-bg border-t border-border px-6 pt-8 pb-12">
-              <div className="font-mono text-[9px] tracking-[5px] text-red-noir uppercase mb-4 animate-flicker">
-                The Experience
+            <div className="flex-1 flex flex-col min-h-full pb-32">
+              <div className="relative flex-1 min-h-[400px] flex items-center justify-center overflow-hidden bg-bg2">
+                {/* Atmospheric Glow */}
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80vw] h-[80vw] max-w-[600px] max-h-[600px] rounded-full bg-radial from-red-noir/5 to-transparent blur-3xl" />
+
+                <motion.svg
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ duration: 1.5, ease: 'easeOut' }}
+                  className="w-[clamp(300px,90vw,500px)] h-auto block relative z-10 drop-shadow-[0_0_30px_rgba(0,0,0,0.5)]"
+                  viewBox="0 0 360 320"
+                >
+                  <defs>
+                    <radialGradient id="doorGlow" cx="50%" cy="40%" r="60%">
+                      <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.25" />
+                      <stop offset="100%" stopColor="#f59e0b" stopOpacity="0" />
+                    </radialGradient>
+                    <linearGradient id="doorSpill" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.4" />
+                      <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.02" />
+                    </linearGradient>
+                    <filter id="noise">
+                      <feTurbulence
+                        type="fractalNoise"
+                        baseFrequency="0.8"
+                        numOctaves="4"
+                        stitchTiles="stitch"
+                      />
+                      <feColorMatrix type="saturate" values="0" />
+                    </filter>
+                  </defs>
+
+                  {/* Floor */}
+                  <rect x="0" y="285" width="360" height="35" fill="#050505" />
+                  <line
+                    x1="0"
+                    y1="285"
+                    x2="360"
+                    y2="285"
+                    stroke="#1a1a1a"
+                    strokeWidth="0.5"
+                  />
+
+                  {/* Light Spill on Floor */}
+                  <ellipse cx="180" cy="285" rx="120" ry="30" fill="url(#doorGlow)" opacity="0.5" />
+
+                  {/* Door Frame */}
+                  <rect x="100" y="30" width="160" height="255" fill="#000" stroke="#1a1a1a" strokeWidth="1" />
+
+                  {/* Interior Light */}
+                  <rect x="105" y="35" width="150" height="250" fill="#080808" />
+                  <rect x="145" y="35" width="110" height="250" fill="url(#doorSpill)" />
+
+                  {/* The Detective Silhouette */}
+                  <g className="detective">
+                    {/* Fedora */}
+                    <path d="M165 88 L195 88 L198 94 L162 94 Z" fill="#000" />
+                    <path d="M172 78 Q180 74 188 78 L190 88 L170 88 Z" fill="#000" />
+
+                    {/* Head */}
+                    <circle cx="180" cy="102" r="9" fill="#000" />
+
+                    {/* Trench Coat */}
+                    <path d="M158 120 Q180 112 202 120 L215 285 L145 285 Z" fill="#000" />
+
+                    {/* Arms */}
+                    <path d="M158 120 L145 200 L155 205 L165 125 Z" fill="#000" />
+                    <path d="M202 120 L215 200 L205 205 L195 125 Z" fill="#000" />
+
+                    {/* Shadow */}
+                    <ellipse cx="180" cy="285" rx="45" ry="6" fill="#000" opacity="0.8" />
+                  </g>
+
+                  {/* Dust Motes (Animated in CSS/Framer) */}
+                  <circle cx="140" cy="120" r="0.6" fill="#f59e0b" opacity="0.3" />
+                  <circle cx="220" cy="160" r="0.4" fill="#f59e0b" opacity="0.5" />
+                  <circle cx="170" cy="200" r="0.8" fill="#f59e0b" opacity="0.2" />
+                </motion.svg>
               </div>
-              <h2 className="font-serif text-[clamp(22px,6vw,28px)] font-light text-ink leading-relaxed mb-4">
-                Someone was here.
-                <br />
-                <em className="italic text-ink2">Now they're not.</em>
-              </h2>
-              <p className="font-serif text-[clamp(14px,4vw,16px)] font-light italic text-ink3 leading-relaxed mb-8">
-                Point your camera at any real room. A witness inside it
-                remembers everything. Your job: find what they're hiding.
-              </p>
-              <div className="flex gap-2 mb-8">
-                <div className="w-5 h-1.5 rounded-sm bg-red-noir" />
-                <div className="w-1.5 h-1.5 rounded-full bg-border" />
-                <div className="w-1.5 h-1.5 rounded-full bg-border" />
-              </div>
-              <div className="mb-4">
-                <div className="font-mono text-[9px] tracking-[4px] text-ink3 uppercase mb-2">
-                  Detective ID
+
+              <div className="relative z-10 bg-bg border-t border-border px-8 pt-12 pb-16 max-w-2xl mx-auto w-full">
+                <div className="flex items-center gap-4 mb-8">
+                  <div className="h-px flex-1 bg-border/50" />
+                  <div className="h-px flex-1 bg-border/50" />
                 </div>
-                <input
-                  type="text"
-                  value={detectiveName}
-                  onChange={e => setDetectiveName(e.target.value)}
-                  placeholder="Enter your name"
-                  className="w-full bg-surface border border-border font-mono text-sm text-ink px-4 py-3 focus:outline-none focus:border-red-noir placeholder:text-ink3/50"
-                  maxLength={32}
-                />
+
+                <div className="text-center mb-12">
+                  <h2 className="font-display text-[clamp(28px,8vw,42px)] text-ink leading-[0.9] mb-6 uppercase tracking-tight">
+                    Someone was here.
+                    <br />
+                    <span className="text-red-noir italic">Now they're not.</span>
+                  </h2>
+                  <p className="font-serif text-[clamp(16px,4.5vw,18px)] font-light text-ink2 leading-relaxed italic max-w-md mx-auto">
+                    "The room remembers what the eyes forget. Point your lens at the truth and find what they're hiding."
+                  </p>
+                </div>
+
+                <div className="space-y-10">
+                  <div className="group">
+                    <div className="flex items-center gap-4 border-b border-border pb-3 group-focus-within:border-red-noir transition-colors">
+                      <div className="font-mono text-[10px] tracking-[2px] text-ink4 uppercase whitespace-nowrap">
+                        Detective ID:
+                      </div>
+                      <input
+                        type="text"
+                        value={detectiveName}
+                        onChange={e => setDetectiveName(e.target.value)}
+                        placeholder="ENTER NAME"
+                        className="flex-1 bg-transparent border-none font-mono text-sm tracking-[3px] text-ink placeholder:text-ink4/20 focus:outline-none uppercase"
+                        maxLength={32}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col items-center gap-6">
+                    <div className="flex gap-3">
+                      <div className="w-8 h-1 bg-red-noir" />
+                      <div className="w-2 h-1 bg-border" />
+                      <div className="w-2 h-1 bg-border" />
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        if (detectiveName.trim()) {
+                          navigateToScreen('camera');
+                        }
+                      }}
+                      disabled={!detectiveName.trim()}
+                      className={`group relative w-full font-display text-xs tracking-[6px] text-white uppercase py-6 shadow-[0_20px_40px_rgba(155,35,24,0.2)] active:scale-95 transition-all overflow-hidden ${!detectiveName.trim() ? 'bg-ink4 cursor-not-allowed opacity-50' : 'bg-red-noir cursor-pointer hover:shadow-[0_25px_50px_rgba(155,35,24,0.3)]'}`}
+                    >
+                      <span className="relative z-10">TAKE THE CASE</span>
+                      <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                    </button>
+                  </div>
+                </div>
               </div>
-              <button
-                onClick={() => setCurrentScreen('camera')}
-                disabled={detectiveName.trim() === ''}
-                className="w-full font-display text-xs tracking-[5px] text-white uppercase cursor-pointer bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                ENTER THE SCENE
-              </button>
             </div>
           </motion.div>
         )}
@@ -1465,107 +1918,227 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-10 flex flex-col bg-bg"
+            className="fixed inset-0 z-10 bg-bg overflow-y-auto"
           >
-            <div className="h-[clamp(220px,44vh,340px)] flex-shrink-0 relative overflow-hidden bg-gradient-to-br from-bg to-bg2 flex items-end p-6">
-              <div className="absolute inset-0 pointer-events-none bg-radial-[ellipse_at_50%_30%] from-red-noir/15 to-transparent" />
-              <div className="absolute top-12 right-6 font-display text-[10px] tracking-[3px] text-red-noir/35 border border-red-noir/20 px-2.5 py-1 rotate-4 pointer-events-none">
-                CONFIDENTIAL
-              </div>
+            <div className="min-h-full">
+              {/* Header Section - Editorial Style */}
+              <div className="relative h-[clamp(240px,45vh,380px)] bg-bg2 border-b border-border overflow-hidden">
+                {/* Background Accents */}
+                <div className="absolute inset-0 pointer-events-none">
+                  <div className="absolute top-0 left-0 w-full h-full bg-radial-[circle_at_20%_30%] from-red-noir/10 to-transparent" />
+                  <div className="absolute -right-20 -top-20 w-64 h-64 rounded-full border border-red-noir/5" />
+                </div>
 
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-[64%] pointer-events-none">
-                <div className="w-[clamp(78px,20vw,96px)] h-[clamp(78px,20vw,96px)] rounded-full border border-redmute flex items-center justify-center relative">
-                  <div className="absolute -inset-2.5 rounded-full border border-red-noir/18" />
-                  <div className="text-[clamp(30px,8vw,40px)]">🕵️</div>
+                {/* Confidential Stamp */}
+                <div className="absolute top-8 right-8 pointer-events-none">
+                  <div className="border-2 border-red-noir/40 px-3 py-1.5 rotate-12 flex flex-col items-center">
+                    <div className="font-display text-[10px] tracking-[4px] text-red-noir/60 uppercase leading-none mb-0.5">
+                      CONFIDENTIAL
+                    </div>
+                    <div className="font-mono text-[7px] tracking-[2px] text-red-noir/40 uppercase">
+                      EYES ONLY
+                    </div>
+                  </div>
+                </div>
+
+                {/* Main Header Content */}
+                <div className="absolute inset-0 flex flex-col justify-end p-6 sm:p-8 pl-6 sm:pl-10 lg:pl-16">
+                  <div className="flex items-end gap-6 mb-4">
+                    <div className="relative group">
+                      <div className="w-[clamp(100px,25vw,130px)] h-[clamp(100px,25vw,130px)] bg-bg border border-border p-1.5 shadow-2xl relative z-10">
+                        <div className="w-full h-full overflow-hidden relative">
+                          {persona.avatarUrl ? (
+                            <img
+                              src={persona.avatarUrl}
+                              alt={persona.name}
+                              className="w-full h-full object-cover grayscale hover:grayscale-0 transition-all duration-700"
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-4xl bg-bg2">
+                              🕵️
+                            </div>
+                          )}
+                          <div className="absolute inset-0 border border-white/10 pointer-events-none" />
+                        </div>
+                      </div>
+                      {/* Decorative Shadow/Offset */}
+                      <div className="absolute -bottom-2 -right-2 w-full h-full border border-red-noir/20 -z-0" />
+                    </div>
+
+                    <div className="flex-1 pb-2">
+                      <div className="font-mono text-[9px] tracking-[4px] text-red-noir uppercase mb-2">
+                        {persona.archetype}
+                      </div>
+                      <div className="font-mono text-[10px] tracking-[4px] text-ink4 uppercase mb-2">
+                        SUBJECT IDENTIFIED
+                      </div>
+                      <h2 className="font-display text-[clamp(24px,8vw,52px)] font-normal text-ink tracking-tight leading-[0.9] uppercase break-words hyphens-auto">
+                        {persona.name}
+                      </h2>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className="relative z-10">
-                <div className="font-mono text-[9px] tracking-[4px] text-red-noir uppercase mb-2">
-                  {persona.archetype}
-                </div>
-                <h2 className="font-display text-[clamp(28px,9vw,42px)] font-normal text-ink tracking-widest leading-none">
-                  {persona.name}
-                </h2>
-              </div>
-            </div>
+              <div className="bg-bg">
+                <div className="max-w-6xl mx-auto px-6 sm:px-8 lg:px-12 py-10 pb-48 space-y-12">
+                {/* Opening Statement */}
+                <section>
+                  <div className="flex items-center gap-4 mb-6">
+                    <div className="h-px flex-1 bg-border" />
+                    <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase">
+                      Initial Contact
+                    </div>
+                    <div className="h-px w-8 bg-border" />
+                  </div>
+                  <p className="font-serif text-[clamp(18px,5vw,22px)] font-light italic text-ink leading-relaxed text-center px-4">
+                    "{typedOpeningStatement}"
+                    {isWitnessTyping && (
+                      <span className="inline-block ml-1 w-[0.55ch] h-[1em] align-[-0.1em] bg-red-noir/60 animate-pulse" />
+                    )}
+                  </p>
+                </section>
 
-            <div className="flex-1 overflow-y-auto px-6 pt-6 pb-24">
-              <div className="border-l-2 border-redmute pl-5 mb-8">
-                <p className="font-serif text-[clamp(15px,4.5vw,18px)] font-light italic text-ink2 leading-relaxed">
-                  {typedOpeningStatement}
-                  {isWitnessTyping && (
-                    <span className="inline-block ml-1 w-[0.55ch] h-[1em] align-[-0.1em] bg-red-noir/60 animate-pulse" />
-                  )}
-                </p>
-              </div>
+                {/* Narrative & Details Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
+                  <div className="md:col-span-2 space-y-10">
+                    <section>
+                      <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
+                        Case Scene Narrative
+                      </div>
+                      <div className="bg-bg2 p-6 border-l-2 border-red-noir/30">
+                        <p className="font-serif text-[15px] text-ink2 leading-relaxed italic">
+                          "{witnessQuote || persona.openingStatement}"
+                        </p>
+                      </div>
+                    </section>
 
-              <div className="grid grid-cols-2 gap-px bg-border border border-border mb-8">
-                <div className="bg-surface p-4">
-                  <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-1.5">
-                    Age
+                    {/* Evidence Links */}
+                    <section>
+                      <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-6 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-noir" />
+                        Evidence Connections
+                      </div>
+                      {detections.length === 0 ? (
+                        <div className="border border-border bg-bg2 p-4 text-sm text-ink3 italic">
+                          No evidence logged yet. Return to the scene and scan the room.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-4">
+                          {detections.map((obj, i) => {
+                            const isActive = activeEvidence === obj.label;
+                            return (
+                              <button
+                                key={`${obj.label}-${i}`}
+                                onClick={() => setActiveEvidence(obj.label)}
+                                className={`group text-left flex items-start gap-4 p-4 border transition-colors ${
+                                  isActive
+                                    ? 'border-red-noir bg-red-noir/10'
+                                    : 'border-border bg-bg hover:border-red-noir/30'
+                                }`}
+                              >
+                                <div className="w-8 h-8 rounded-full bg-bg2 border border-border flex items-center justify-center font-mono text-[10px] text-ink4 group-hover:text-red-noir transition-colors">
+                                  0{i + 1}
+                                </div>
+                                <div className="flex-1">
+                                  <span className="font-display text-[11px] text-ink tracking-[2px] uppercase block mb-1">
+                                    {obj.label}
+                                  </span>
+                                  <p className="font-serif text-[13px] text-ink3 leading-snug">
+                                    {obj.description}
+                                  </p>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
                   </div>
-                  <div className="font-serif text-[clamp(14px,4vw,17px)] text-ink">
-                    {persona.age}
-                  </div>
+
+                  {/* Sidebar Stats */}
+                  <aside className="space-y-8">
+                    <div className="border border-border divide-y divide-border bg-bg2">
+                      <div className="p-5">
+                        <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
+                          Age
+                        </div>
+                        <div className="font-serif text-lg text-ink">{persona.age}</div>
+                      </div>
+                      <div className="p-5">
+                        <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
+                          Occupation
+                        </div>
+                        <div className="font-serif text-lg text-ink leading-tight">
+                          {persona.occupation}
+                        </div>
+                      </div>
+                      <div className="p-5">
+                        <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-2">
+                          Nervous Tells
+                        </div>
+                        <div className="space-y-2 mt-2">
+                          {persona.tells.map((tell, i) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <div className="w-1 h-1 rounded-full bg-red-noir/40" />
+                              <span className="font-serif text-sm text-ink2">{tell}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        onClick={() => setInterrogationMode('text')}
+                        className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
+                          interrogationMode === 'text'
+                            ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                            : 'border-border text-ink3 hover:border-red-noir/50'
+                        }`}
+                      >
+                        Interrogate With Text
+                      </button>
+                      <button
+                        onClick={() => setInterrogationMode('voice')}
+                        className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
+                          interrogationMode === 'voice'
+                            ? 'border-red-noir bg-red-noir/10 text-red-noir'
+                            : 'border-border text-ink3 hover:border-red-noir/50'
+                        }`}
+                      >
+                        Interrogate With Voice
+                      </button>
+                    </div>
+
+                    <AnimatePresence>
+                      {!isWitnessTyping && typedOpeningStatement.length > 0 && (
+                        <motion.button
+                          initial={{ opacity: 0, y: 12, scale: 0.985 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 8 }}
+                          transition={{ duration: 0.35, ease: 'easeOut' }}
+                          onClick={beginInterrogation}
+                          className="group relative w-full font-display text-[10px] tracking-[5px] text-white uppercase bg-red-noir py-6 shadow-xl active:scale-95 transition-all overflow-hidden"
+                        >
+                          <span className="relative z-10">
+                            {interrogationMode === 'voice'
+                              ? 'BEGIN VOICE INTERROGATION'
+                              : 'BEGIN TEXT INTERROGATION'}
+                          </span>
+                          <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                        </motion.button>
+                      )}
+                    </AnimatePresence>
+                  </aside>
                 </div>
-                <div className="bg-surface p-4">
-                  <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-1.5">
-                    Occupation
-                  </div>
-                  <div className="font-serif text-[clamp(14px,4vw,17px)] text-ink">
-                    {persona.occupation}
-                  </div>
-                </div>
-                <div className="bg-surface p-4 col-span-2">
-                  <div className="font-mono text-[8px] tracking-[3px] text-ink4 uppercase mb-1.5">
-                    Nervous Tells
-                  </div>
-                  <div className="font-serif text-[clamp(14px,4vw,17px)] text-ink">
-                    {persona.tells.join(', ')}
-                  </div>
+
+                {/* Footer Spacer */}
+                <div className="h-12" />
                 </div>
               </div>
-
-              <div className="grid grid-cols-2 gap-2 mb-5">
-                <button
-                  onClick={() => setInterrogationMode('text')}
-                  className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
-                    interrogationMode === 'text'
-                      ? 'border-red-noir bg-red-noir/10 text-red-noir'
-                      : 'border-border text-ink3 hover:border-red-noir/50'
-                  }`}
-                >
-                  Interrogate With Text
-                </button>
-                <button
-                  onClick={() => setInterrogationMode('voice')}
-                  className={`font-mono text-[9px] tracking-[2px] uppercase border px-3 py-3 transition-all ${
-                    interrogationMode === 'voice'
-                      ? 'border-red-noir bg-red-noir/10 text-red-noir'
-                      : 'border-border text-ink3 hover:border-red-noir/50'
-                  }`}
-                >
-                  Interrogate With Voice
-                </button>
-              </div>
-
-              <AnimatePresence>
-                {!isWitnessTyping && typedOpeningStatement.length > 0 && (
-                  <motion.button
-                    initial={{ opacity: 0, y: 12, scale: 0.985 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 8 }}
-                    transition={{ duration: 0.35, ease: 'easeOut' }}
-                    onClick={beginInterrogation}
-                    className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-4 shadow-[0_0_18px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
-                  >
-                    {interrogationMode === 'voice'
-                      ? 'BEGIN VOICE INTERROGATION'
-                      : 'BEGIN TEXT INTERROGATION'}
-                  </motion.button>
-                )}
-              </AnimatePresence>
             </div>
           </motion.div>
         )}
@@ -1669,7 +2242,10 @@ export default function App() {
                   </div>
                 </motion.div>
               ))}
-              {isInterrogating && (
+              {isInterrogating &&
+                !messages.some(
+                  m => m.role === 'witness' && m.isStreaming
+                ) && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -1960,7 +2536,7 @@ export default function App() {
           </motion.div>
         )}
 
-        {currentScreen === 'casefile' && !verdict && (
+        {currentScreen === 'casefile' && !caseFile && (
           <motion.div
             key="casefile-loading"
             initial={{ opacity: 0 }}
@@ -1979,97 +2555,315 @@ export default function App() {
           </motion.div>
         )}
 
-        {currentScreen === 'casefile' && verdict && (
+        {currentScreen === 'casefile' && (
           <motion.div
             key="casefile"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-10 flex flex-col bg-bg overflow-y-auto"
+            className="fixed inset-0 z-10 bg-bg overflow-y-auto"
           >
-            <div className="p-8 border-b-4 border-double border-border">
-              <div className="flex justify-between items-start mb-8 pt-8">
-                <div>
-                  <div className="font-mono text-[10px] tracking-[4px] text-ink4 uppercase">
-                    Dossier #882-B
+            <div className="min-h-full flex flex-col">
+              <div className="p-8 border-b-4 border-double border-border shrink-0">
+                <div className="flex justify-between items-start mb-8 pt-8">
+                  <div>
+                    <div className="font-mono text-[10px] tracking-[4px] text-ink4 uppercase">
+                      Dossier #882-B
+                    </div>
+                    <h2 className="font-display text-4xl text-ink tracking-tighter">
+                      CASE FILE
+                    </h2>
+                    {detectiveName ? (
+                      <div className="mt-2 font-mono text-[9px] tracking-[3px] text-red-noir uppercase">
+                        Lead: Det. {detectiveName}
+                      </div>
+                    ) : null}
                   </div>
-                  <h2 className="font-display text-4xl text-ink tracking-tighter">
-                    CASE CLOSED
-                  </h2>
-                </div>
-                <div
-                  className={`px-4 py-2 border-2 font-display text-lg tracking-widest ${verdict.correct ? 'border-green-noir text-green-noir' : 'border-red-noir text-red-noir'} rotate-3`}
-                >
-                  {verdict.correct ? 'SOLVED' : 'UNSOLVED'}
                 </div>
               </div>
 
-              <div className="bg-surface p-6 border-l-4 border-ink mb-10">
-                <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-2">
-                  Official Verdict
-                </div>
-                <p className="font-serif text-xl text-ink leading-tight mb-4">
-                  {verdict.verdict}
-                </p>
-                <p className="font-serif text-sm text-ink2 italic">
-                  {verdict.explanation}
-                </p>
-              </div>
+              <div className="px-8 pt-10 pb-24 max-w-3xl mx-auto w-full">
+                <div className="space-y-12">
+                  {caseFile ? (
+                    <div className="bg-surface border border-border p-8 shadow-2xl relative">
+                      <div className="absolute top-0 left-0 w-full h-1 bg-red-noir" />
+                      <div className="absolute top-4 right-4 font-mono text-[8px] text-ink4">
+                        FILE_REF: {caseFile.caseNumber}/X
+                      </div>
 
-              <div className="space-y-12 pb-24">
-                <section>
-                  <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-1">
-                    Timeline of Events
-                  </div>
-                  <div className="space-y-4">
-                    {timeline.map((event, i) => (
-                      <div key={i} className="flex gap-4">
-                        <div className="font-mono text-[10px] text-ink4 pt-1">
-                          0{i + 1}
+                      <div className="mb-12 border-b border-border pb-8">
+                        <div className="font-mono text-[10px] tracking-[4px] text-red-noir uppercase mb-2">
+                          Official Case File
                         </div>
-                        <p className="font-serif text-sm text-ink leading-snug">
-                          {event}
-                        </p>
+                        <h2 className="font-display text-2xl tracking-widest text-ink uppercase leading-tight">
+                          Case #{caseFile.caseNumber}
+                        </h2>
+                        <div className="font-mono text-[9px] text-ink4 mt-1 uppercase tracking-wider">
+                          {caseFile.date} · {caseFile.time}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </section>
 
-                <section>
-                  <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-1">
-                    Interrogation Stats
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="border border-border p-4">
-                      <div className="font-mono text-[8px] text-ink4 uppercase">
-                        Contradictions Caught
-                      </div>
-                      <div className="font-display text-2xl text-ink">
-                        {contradictionCount}
+                      <div className="space-y-10">
+                        <section>
+                          <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase mb-2">
+                            Incident Type
+                          </div>
+                          <div className="font-serif text-base text-ink font-medium">
+                            {caseFile.incidentType}
+                          </div>
+                        </section>
+
+                        <section>
+                          <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase mb-3">
+                            Victim
+                          </div>
+                          <div className="space-y-2">
+                            <div className="font-serif text-lg text-ink">
+                              {caseFile.victim.name}, {caseFile.victim.age},{' '}
+                              {caseFile.victim.occupation}
+                            </div>
+                            <p className="font-serif text-sm text-ink2 italic leading-relaxed">
+                              {caseFile.victim.discovery}
+                            </p>
+                            <div className="inline-block font-mono text-[9px] tracking-wider text-red-noir border border-red-noir/20 px-2 py-0.5 uppercase">
+                              {caseFile.victim.condition}
+                            </div>
+                          </div>
+                        </section>
+
+                        <section className="pt-6 border-t border-border">
+                          <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase mb-4">
+                            Scene Report
+                          </div>
+                          <p className="font-serif text-base text-ink2 leading-relaxed whitespace-pre-line">
+                            {caseFile.sceneReport}
+                          </p>
+                        </section>
+
+                        <section className="pt-6 border-t border-border">
+                          <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase mb-3">
+                            Witness on Scene
+                          </div>
+                          <div className="space-y-2">
+                            <div className="font-serif text-lg text-ink">
+                              {caseFile.witnessOnScene.name},{' '}
+                              {caseFile.witnessOnScene.age},{' '}
+                              {caseFile.witnessOnScene.occupation}
+                            </div>
+                            <p className="font-serif text-sm text-ink2 leading-relaxed">
+                              {caseFile.witnessOnScene.reason}
+                            </p>
+                            <p className="font-serif text-sm text-ink3 italic leading-relaxed">
+                              {caseFile.witnessOnScene.demeanor}
+                            </p>
+                          </div>
+                        </section>
+
+                        <section className="pt-6 border-t border-border">
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase mb-1.5">
+                                Investigating Detective
+                              </div>
+                              <div className="font-serif text-sm text-ink font-medium uppercase tracking-wider">
+                                {detectiveName || 'UNKNOWN'}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase mb-1.5">
+                                Assigned
+                              </div>
+                              <div className="font-serif text-sm text-ink">
+                                {caseFile.assignedDate}
+                              </div>
+                            </div>
+                          </div>
+                        </section>
+
+                        <section className="pt-6 border-t border-border">
+                          <div className="flex justify-between items-center">
+                            <div className="font-mono text-[8px] tracking-[2px] text-ink4 uppercase">
+                              Case Status
+                            </div>
+                            <div className="font-mono text-[10px] tracking-[2px] text-red-noir font-bold uppercase">
+                              OPEN — AWAITING INTERROGATION
+                            </div>
+                          </div>
+                        </section>
                       </div>
                     </div>
-                    <div className="border border-border p-4">
-                      <div className="font-mono text-[8px] text-ink4 uppercase">
-                        Time Remaining
+                  ) : (
+                    <div className="bg-surface border border-border p-6">
+                      <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-2">
+                        Official Case File
                       </div>
-                      <div className="font-display text-2xl text-ink">
-                        {formatTime(timeLeft)}
+                      <p className="font-serif text-sm text-ink2 italic">
+                        Case file still compiling.
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      if (hasPersona) {
+                        navigateToScreen('witness');
+                        return;
+                      }
+                      handleMeetWitness();
+                    }}
+                    className="w-full font-display text-xs tracking-[5px] text-white uppercase bg-red-noir py-5 shadow-[0_20px_40px_rgba(155,35,24,0.3)] active:scale-95 transition-all"
+                  >
+                    {hasPersona ? 'RETURN TO WITNESS' : 'MEET THE WITNESS'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {currentScreen === 'verdict' && verdict && (
+          <motion.div
+            key="verdict"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-10 bg-bg overflow-y-auto"
+          >
+            <div className="min-h-full flex flex-col">
+              <div className="p-8 border-b-4 border-double border-border shrink-0">
+                <div className="flex justify-between items-start mb-8 pt-8">
+                  <div>
+                    <div className="font-mono text-[10px] tracking-[4px] text-ink4 uppercase">
+                      Dossier #882-B
+                    </div>
+                    <h2 className="font-display text-4xl text-ink tracking-tighter">
+                      CASE CLOSED
+                    </h2>
+                    {detectiveName ? (
+                      <div className="mt-2 font-mono text-[9px] tracking-[3px] text-red-noir uppercase">
+                        Lead: Det. {detectiveName}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div
+                    className={`px-4 py-2 border-2 font-display text-lg tracking-widest ${
+                      verdict.correct
+                        ? 'border-green-noir text-green-noir'
+                        : 'border-red-noir text-red-noir'
+                    } rotate-3`}
+                  >
+                    {verdict.correct ? 'SOLVED' : 'UNSOLVED'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-8 pt-10 pb-24">
+                <div className="bg-surface p-6 border-l-4 border-ink mb-10">
+                  <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-2">
+                    Official Verdict
+                  </div>
+                  <p className="font-serif text-xl text-ink leading-tight mb-4">
+                    {verdict.verdict}
+                  </p>
+                  <p className="font-serif text-sm text-ink2 italic">
+                    {verdict.explanation}
+                  </p>
+                </div>
+
+                <div className="space-y-12">
+                  <section>
+                    <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-1">
+                      Timeline of Events
+                    </div>
+                    <div className="space-y-4">
+                      {timeline.map((event, i) => (
+                        <div key={i} className="flex gap-4">
+                          <div className="font-mono text-[10px] text-ink4 pt-1">
+                            0{i + 1}
+                          </div>
+                          <p className="font-serif text-sm text-ink leading-snug">
+                            {event}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section>
+                    <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-1">
+                      Testimony Review
+                    </div>
+                    <div className="space-y-3">
+                      {testimonyReview.length === 0 ? (
+                        <div className="bg-surface p-3 border border-border">
+                          <p className="font-serif text-sm text-ink2 italic">
+                            No testimony recorded yet.
+                          </p>
+                        </div>
+                      ) : (
+                        testimonyReview.map((review, i) => (
+                          <div
+                            key={i}
+                            className="bg-surface p-3 border border-border"
+                          >
+                            <p className="font-serif text-sm text-ink italic mb-1">
+                              "{review.quote}"
+                            </p>
+                            <div
+                              className={`font-mono text-[8px] tracking-[2px] uppercase ${
+                                review.status === 'CONTRADICTION'
+                                  ? 'text-red-noir'
+                                  : review.status === 'CRITICAL'
+                                    ? 'text-amber-noir'
+                                    : review.status === 'VERIFIED'
+                                      ? 'text-green-noir'
+                                      : 'text-ink4'
+                              }`}
+                            >
+                              {review.status}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </section>
+
+                  <section>
+                    <div className="font-mono text-[9px] tracking-[3px] text-ink4 uppercase mb-4 border-b border-border pb-1">
+                      Interrogation Stats
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="border border-border p-4">
+                        <div className="font-mono text-[8px] text-ink4 uppercase">
+                          Contradictions Caught
+                        </div>
+                        <div className="font-display text-2xl text-ink">
+                          {contradictionCount}
+                        </div>
+                      </div>
+                      <div className="border border-border p-4">
+                        <div className="font-mono text-[8px] text-ink4 uppercase">
+                          Time Remaining
+                        </div>
+                        <div className="font-display text-2xl text-ink">
+                          {formatTime(timeLeft)}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </section>
+                  </section>
 
-                <button
-                  onClick={() => {
-                    try {
-                      localStorage.removeItem(STORAGE_KEY);
-                    } catch {}
-                    window.location.reload();
-                  }}
-                  className="w-full font-display text-xs tracking-[5px] text-ink uppercase bg-surface border border-border py-5 active:bg-surface2 transition-all"
-                >
-                  NEW INVESTIGATION
-                </button>
+                  <button
+                    onClick={() => {
+                      try {
+                        localStorage.removeItem(STORAGE_KEY);
+                      } catch {}
+                      window.location.reload();
+                    }}
+                    className="w-full font-display text-xs tracking-[5px] text-ink uppercase bg-surface border border-border py-5 active:bg-surface2 transition-all"
+                  >
+                    NEW INVESTIGATION
+                  </button>
+                </div>
               </div>
             </div>
           </motion.div>
@@ -2285,6 +3079,7 @@ export default function App() {
         'interrogation',
         'accusation',
         'casefile',
+        'verdict',
       ].includes(currentScreen) && (
         <div className="fixed bottom-0 left-0 right-0 h-[62px] bg-bg/95 border-t border-border z-50 flex items-stretch">
           <button
@@ -2350,16 +3145,18 @@ export default function App() {
           </button>
           <button
             onClick={() => {
-              if (!hasVerdict) return;
+              if (!hasCaseFile) return;
               navigateToScreen('casefile');
             }}
-            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${currentScreen === 'casefile' ? 'border-red-noir' : 'border-transparent'} ${!hasVerdict ? 'opacity-30 cursor-not-allowed' : ''}`}
+            disabled={!hasCaseFile}
+            aria-disabled={!hasCaseFile}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 border-t-2 transition-all ${isCaseFileActive ? 'border-red-noir' : 'border-transparent'} ${!hasCaseFile ? 'opacity-30 cursor-not-allowed' : ''}`}
           >
             <FileText
-              className={`w-4 h-4 ${currentScreen === 'casefile' ? 'text-red-noir' : 'text-ink4'}`}
+              className={`w-4 h-4 ${isCaseFileActive ? 'text-red-noir' : 'text-ink4'}`}
             />
             <span
-              className={`font-mono text-[7px] tracking-wider uppercase ${currentScreen === 'casefile' ? 'text-red-noir' : 'text-ink4'}`}
+              className={`font-mono text-[7px] tracking-wider uppercase ${isCaseFileActive ? 'text-red-noir' : 'text-ink4'}`}
             >
               Case File
             </span>
@@ -2367,7 +3164,7 @@ export default function App() {
         </div>
       )}
 
-      {currentScreen !== 'splash' && (
+      {currentScreen !== 'splash' && currentScreen !== 'onboarding' && (
         <button
           onClick={() => {
             if (currentScreen === 'onboarding') navigateToScreen('splash');
@@ -2381,12 +3178,15 @@ export default function App() {
         </button>
       )}
 
-      <button
-        onClick={toggleTheme}
-        className="fixed top-4 right-6 z-[60] w-11 h-11 rounded-full bg-surface2 border border-borderlt flex items-center justify-center text-lg shadow-lg active:scale-90 transition-all"
-      >
-        {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-      </button>
+      {currentScreen !== 'splash' && (
+        <button
+          onClick={toggleTheme}
+          className="fixed top-4 right-6 z-[60] w-11 h-11 rounded-full bg-surface2 border border-borderlt flex items-center justify-center text-lg shadow-lg active:scale-90 transition-all"
+          aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        </button>
+      )}
     </div>
   );
 }

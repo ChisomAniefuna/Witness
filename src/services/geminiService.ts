@@ -23,6 +23,30 @@ export interface WitnessPersona {
   guiltyOf: string;
   secret: string;
   method:String;
+  avatarUrl?: string;
+}
+
+export interface CaseFile {
+  caseNumber: string;
+  date: string;
+  time: string;
+  incidentType: string;
+  victim: {
+    name: string;
+    age: number;
+    occupation: string;
+    discovery: string;
+    condition: string;
+  };
+  sceneReport: string;
+  witnessOnScene: {
+    name: string;
+    age: number;
+    occupation: string;
+    reason: string;
+    demeanor: string;
+  };
+  assignedDate: string;
 }
 
 export async function analyzeScene(base64Image: string): Promise<SceneAnalysis> {
@@ -45,6 +69,18 @@ export async function generateWitnessPersona(objects: string[]): Promise<Witness
   });
   if (!res.ok) {
     throw new Error("Witness persona failed");
+  }
+  return res.json();
+}
+
+export async function generateCaseFile(objects: string[]): Promise<CaseFile> {
+  const res = await fetch(`${API_BASE}/api/casefile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ objects }),
+  });
+  if (!res.ok) {
+    throw new Error("Case file failed");
   }
   return res.json();
 }

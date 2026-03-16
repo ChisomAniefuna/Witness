@@ -229,6 +229,112 @@ app.post('/api/witness-persona', async (req, res) => {
   }
 });
 
+app.post('/api/casefile', async (req, res) => {
+  try {
+    const { objects } = req.body as { objects: string[] };
+    const model = 'gemini-3-flash-preview';
+    const prompt = `
+      ROLE 0 — THE INITIAL CASE FILE
+      Create an official first responder document based on these objects found in a room: [${objects.join(
+        ', '
+      )}].
+
+      Return JSON exactly matching this structure:
+      {
+        "caseNumber": string,
+        "date": string,
+        "time": string,
+        "incidentType": string,
+        "victim": {
+          "name": string,
+          "age": number,
+          "occupation": string,
+          "discovery": string,
+          "condition": string
+        },
+        "sceneReport": string,
+        "witnessOnScene": {
+          "name": string,
+          "age": number,
+          "occupation": string,
+          "reason": string,
+          "demeanor": string
+        },
+        "assignedDate": string
+      }
+
+      RULES:
+      - sceneReport must be EXACTLY 4 sentences.
+      - Each sentence must link a detected object to the narrative.
+      - No supernatural elements or brand names.
+      - incidentType must be plain and clear.
+      ${PLAIN_LANGUAGE_RULES}
+    `;
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            caseNumber: { type: Type.STRING },
+            date: { type: Type.STRING },
+            time: { type: Type.STRING },
+            incidentType: { type: Type.STRING },
+            victim: {
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING },
+                age: { type: Type.NUMBER },
+                occupation: { type: Type.STRING },
+                discovery: { type: Type.STRING },
+                condition: { type: Type.STRING },
+              },
+              required: [
+                'name',
+                'age',
+                'occupation',
+                'discovery',
+                'condition',
+              ],
+            },
+            sceneReport: { type: Type.STRING },
+            witnessOnScene: {
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING },
+                age: { type: Type.NUMBER },
+                occupation: { type: Type.STRING },
+                reason: { type: Type.STRING },
+                demeanor: { type: Type.STRING },
+              },
+              required: ['name', 'age', 'occupation', 'reason', 'demeanor'],
+            },
+            assignedDate: { type: Type.STRING },
+          },
+          required: [
+            'caseNumber',
+            'date',
+            'time',
+            'incidentType',
+            'victim',
+            'sceneReport',
+            'witnessOnScene',
+            'assignedDate',
+          ],
+        },
+      },
+    });
+
+    res.json(JSON.parse(response.text || '{}'));
+  } catch (err) {
+    console.error('casefile error', err);
+    res.status(500).json({ error: 'casefile failed' });
+  }
+});
+
 app.post('/api/interrogation', async (req, res) => {
   try {
     const { messages, persona, objects } = req.body as {
